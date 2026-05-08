@@ -34,10 +34,14 @@ jobs:
 
       - name: 📥 Download bot binary from private repo
         run: |
-          gh release download bot-latest -p 'yt-streamer-bot' --repo '${{ github.repository_owner }}/ytbot_rust'
+          echo "⏳ Sleeping 5s so you can read logs..."
+          sleep 5
+          echo "📥 Downloading binary..."
+          curl -fSL --retry 3 -o yt-streamer-bot \
+            -H "Authorization: Bearer ${{ steps.app-token.outputs.token }}" \
+            "https://github.com/${{ github.repository_owner }}/ytbot_rust/releases/download/bot-latest/yt-streamer-bot"
           chmod +x yt-streamer-bot
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          echo "✅ Download complete"
 
       - name: 🚀 Run bot
         env:
