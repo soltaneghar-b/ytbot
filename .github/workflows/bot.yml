@@ -1,0 +1,51 @@
+# bot.yml
+name: 🤖 YouTube Streamer Dispatcher
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # fallback every 30 minutes
+  workflow_dispatch:
+    inputs:
+      offset:
+        description: 'Update offset to start from'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: yt-streamer-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6 hours max
+    steps:
+      - name: 🔐 Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: 📥 Download bot binary from private repo
+        run: |
+          gh release download bot-latest -p 'yt-streamer-bot' --repo '${{ github.repository_owner }}/ytbot_rust'
+          chmod +x yt-streamer-bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: 🚀 Run bot
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          BOT_REPO: ${{ github.event.repository.name }}
+          STREAMER_REPO_PREFIX: 'st'
+          STREAMER_REPO_COUNT: '3'
+          OFFSET: ${{ github.event.inputs.offset || '' }}
+        run: ./yt-streamer-bot
