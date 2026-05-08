@@ -39,7 +39,7 @@ jobs:
           echo "📥 Downloading binary..."
           curl -fSL --retry 3 -o yt-streamer-bot \
             -H "Authorization: Bearer ${{ steps.app-token.outputs.token }}" \
-            "https://github.com/${{ github.repository_owner }}/ytbot_rust/releases/download/bot-latest/yt-streamer-bot"
+            "https://raw.githubusercontent.com/${{ github.repository_owner }}/ytbot_rust/refs/heads/bot-binary/yt-streamer-bot"
           chmod +x yt-streamer-bot
           echo "✅ Download complete"
 
