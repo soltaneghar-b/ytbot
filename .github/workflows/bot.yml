@@ -32,7 +32,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: "ytbot,ytbot_rust,st1,st2,st3"
+          repositories: "ytbot,ytbot_rust,st1,st2,st3,st4,st5"
 
       - name: 📥 Download bot binary from private repo
         run: |
@@ -52,7 +52,7 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           BOT_REPO: ${{ github.event.repository.name }}
           STREAMER_REPO_PREFIX: 'st'
-          STREAMER_REPO_COUNT: '3'
+          STREAMER_REPO_COUNT: '5'
           OFFSET: ${{ github.event.inputs.offset || '' }}
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
