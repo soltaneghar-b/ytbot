@@ -1,0 +1,63 @@
+name: 🧹 Auto-delete stale stream & download branches
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    name: 🗑️ Remove branches older than 3 hours
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 🔐 Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: 🧹 Delete stale branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          BRANCHES=$(git branch -r | grep -E 'origin/(stream-|download-)' | sed 's|origin/||')
+          if [ -z "$BRANCHES" ]; then
+            echo "ℹ️ No matching branches found."
+            exit 0
+          fi
+
+          NOW=$(date +%s)
+          THREE_HOURS_SEC=$(( 3 * 3600 ))
+          echo "Current time: $(date -Iseconds)"
+          echo "Cut-off age: 3 hours (${THREE_HOURS_SEC} seconds)"
+          echo ""
+
+          for BRANCH in $BRANCHES; do
+            echo "----------------------------------------"
+            echo "🔍 Checking branch: $BRANCH"
+
+            COMMIT_DATE=$(git show -s --format=%ct "origin/$BRANCH" 2>/dev/null || true)
+            if [ -z "$COMMIT_DATE" ]; then
+              echo "⚠️ Could not get commit date for $BRANCH, skipping."
+              continue
+            fi
+
+            AGE=$(( NOW - COMMIT_DATE ))
+            AGE_MIN=$(( AGE / 60 ))
+            echo "   Commit date: $(date -d @"$COMMIT_DATE" -Iseconds)"
+            echo "   Age: $AGE_MIN minutes"
+
+            if [ "$AGE" -gt "$THREE_HOURS_SEC" ]; then
+              echo "   ⏰ Older than 3 hours, deleting..."
+              git push origin --delete "$BRANCH" || echo "   ⚠️ Failed to delete"
+            else
+              echo "   ✅ Still fresh, keeping."
+            fi
+          done
+
+          echo ""
+          echo "🎉 Cleanup completed."
