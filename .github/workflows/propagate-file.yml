@@ -1,0 +1,109 @@
+# propagate-file.yml
+name: 📂 Propagate File to All st Repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_file:
+        description: 'Path to the file in ytbot (e.g., sanitizer.py)'
+        required: true
+        type: string
+      target_filename:
+        description: 'Name in the target repos (defaults to the source file name)'
+        required: false
+        type: string
+
+jobs:
+  propagate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: 📥 Checkout ytbot
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: ytbot-repo
+
+      - name: 🔐 Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: "st1,st2,st3,st4,st5,st6,st7,st8,st9,st10,st11,st12,st13,st14,st15,st16,st17,st18,st19,st20,st21,st22,st23,st24,st25,st26,st27,st28,st29,st30,st31,st32,st33,st34,st35,st36,st37,st38,st39,st40,st41,st42,st43,st44,st45,st46,st47,st48,st49,st50"
+
+      - name: 🚀 Push file to all repos
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          SOURCE_FILE: ${{ github.event.inputs.source_file }}
+          TARGET_FILENAME: ${{ github.event.inputs.target_filename }}
+        run: |
+          python3 << 'PYEOF'
+          import os, sys, base64, time, requests
+          from pathlib import Path
+
+          # Read config
+          owner = os.environ['OWNER']
+          token = os.environ['GH_TOKEN']
+          source_file = os.environ['SOURCE_FILE']
+          target_name = os.environ.get('TARGET_FILENAME')
+          if not target_name:
+              target_name = Path(source_file).name
+
+          # Read repo list
+          repos_file = Path('ytbot-repo') / 'repos.txt'
+          if not repos_file.exists():
+              print("❌ repos.txt not found in ytbot root")
+              sys.exit(1)
+          repos = [r.strip() for r in repos_file.read_text().splitlines() if r.strip()]
+
+          # Read source file content
+          src_path = Path('ytbot-repo') / source_file
+          if not src_path.exists():
+              print(f"❌ Source file {source_file} not found in ytbot")
+              sys.exit(1)
+          content = src_path.read_bytes()
+          encoded = base64.b64encode(content).decode()
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "ytbot-propagate"
+          }
+
+          for repo in repos:
+              print(f"🔧 Processing {repo}...")
+              api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{target_name}"
+              
+              # Get current SHA if file exists
+              sha = None
+              try:
+                  r = requests.get(api_url, headers=headers, timeout=10)
+                  if r.status_code == 200:
+                      sha = r.json().get('sha')
+              except Exception:
+                  pass
+              
+              # Create or update the file
+              payload = {
+                  "message": f"Update {target_name} from ytbot",
+                  "content": encoded,
+                  "branch": "main"
+              }
+              if sha:
+                  payload["sha"] = sha
+              
+              r = requests.put(api_url, headers=headers, json=payload, timeout=15)
+              if r.status_code in (200, 201):
+                  print(f"   ✅ {repo}: {target_name} updated")
+              else:
+                  print(f"   ❌ {repo}: HTTP {r.status_code} - {r.json().get('message', 'unknown')}")
+              
+              # Small delay to avoid secondary rate limits
+              time.sleep(0.5)
+          
+          print("🎉 Propagation complete.")
+          PYEOF
