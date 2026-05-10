@@ -41,7 +41,7 @@ jobs:
           REPO: ${{ github.event.repository.name }}
           CURRENT_RUN_ID: ${{ github.run_id }}
         run: |
-          RUNS=$(gh api "repos/$OWNER/$REPO/actions/runs?status=in_progress&event=workflow_dispatch&branch=main&per_page=10" -q ".workflow_runs[] | select(.id != ($CURRENT_RUN_ID|tonumber)) | .id")
+          RUNS=$(gh api "repos/$OWNER/$REPO/actions/runs?status=in_progress&branch=main&per_page=10" -q ".workflow_runs[] | select(.id != ($CURRENT_RUN_ID|tonumber)) | .id")
           if [ -n "$RUNS" ]; then
             echo "🛑 Another instance is in progress (run IDs: $RUNS). Exiting."
             exit 0
@@ -50,8 +50,6 @@ jobs:
 
       - name: 📥 Download bot binary from private repo
         run: |
-          echo "⏳ Sleeping 5s so you can read logs..."
-          sleep 5
           echo "📥 Downloading binary..."
           curl -fSL --retry 3 -o yt-streamer-bot \
             -H "Authorization: Bearer ${{ steps.app-token.outputs.token }}" \
