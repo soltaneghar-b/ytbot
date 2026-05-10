@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       source_file:
-        description: 'Path to the file in ytbot (e.g., sanitizer.py)'
+        description: 'Path to the file in ytbot (e.g., sanitize.py)'
         required: true
         type: string
       target_filename:
@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      REPO_LIST: "st1,st2,st3,st4,st5,st6,st7,st8,st9,st10,st11,st12,st13,st14,st15,st16,st17,st18,st19,st20,st21,st22,st23,st24,st25,st26,st27,st28,st29,st30,st31,st32,st33,st34,st35,st36,st37,st38,st39,st40,st41,st42,st43,st44,st45,st46,st47,st48,st49,st50"
     steps:
       - name: 📥 Checkout ytbot
         uses: actions/checkout@v4
@@ -32,7 +34,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: "st1,st2,st3,st4,st5,st6,st7,st8,st9,st10,st11,st12,st13,st14,st15,st16,st17,st18,st19,st20,st21,st22,st23,st24,st25,st26,st27,st28,st29,st30,st31,st32,st33,st34,st35,st36,st37,st38,st39,st40,st41,st42,st43,st44,st45,st46,st47,st48,st49,st50"
+          repositories: ${{ env.REPO_LIST }}
 
       - name: 🚀 Push file to all repos
         env:
@@ -40,12 +42,12 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           SOURCE_FILE: ${{ github.event.inputs.source_file }}
           TARGET_FILENAME: ${{ github.event.inputs.target_filename }}
+          REPO_LIST: ${{ env.REPO_LIST }}
         run: |
           python3 << 'PYEOF'
           import os, sys, base64, time, requests
           from pathlib import Path
 
-          # Read config
           owner = os.environ['OWNER']
           token = os.environ['GH_TOKEN']
           source_file = os.environ['SOURCE_FILE']
@@ -53,12 +55,8 @@ jobs:
           if not target_name:
               target_name = Path(source_file).name
 
-          # Read repo list
-          repos_file = Path('ytbot-repo') / 'repos.txt'
-          if not repos_file.exists():
-              print("❌ repos.txt not found in ytbot root")
-              sys.exit(1)
-          repos = [r.strip() for r in repos_file.read_text().splitlines() if r.strip()]
+          # Repos from environment (comma-separated)
+          repos = [r.strip() for r in os.environ['REPO_LIST'].split(',') if r.strip()]
 
           # Read source file content
           src_path = Path('ytbot-repo') / source_file
