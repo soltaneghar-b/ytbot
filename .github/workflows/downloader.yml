@@ -43,9 +43,19 @@ jobs:
     steps:
       - name: 💾 Disk space check
         run: |
-          AVAIL_MB=$(df /home/runner --output=avail | tail -1 | awk '{print int($1/1024)}')
-          echo "📀 Free: ${AVAIL_MB} MB"
-          [[ $AVAIL_MB -lt 2048 ]] && { echo "❌ <2 GB free"; exit 1; }
+          # Use df -k to get available space in 1K-blocks, then convert to MB
+          AVAIL_KB=$(df -k /home/runner | tail -1 | awk '{print $4}')
+          if [[ -z "$AVAIL_KB" ]]; then
+            echo "⚠️  Could not determine free space; proceeding anyway"
+            exit 0
+          fi
+          AVAIL_MB=$((AVAIL_KB / 1024))
+          echo "📀 Free space: ${AVAIL_MB} MB"
+          if [[ $AVAIL_MB -lt 2048 ]]; then
+            echo "❌ Less than 2 GB free – aborting"
+            exit 1
+          fi
+          echo "✅ Disk space OK"
 
       - name: 🔐 Generate GitHub App token
         id: token
