@@ -1,14 +1,25 @@
-name: 🔽 General Downloader
+name: 🔽 General Downloader (with Logs)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: '🔗 Download URL'
-        required: true
+        description: '🔗 Direct download URL (for any file – NOT for GitHub logs)'
+        required: false
         type: string
+        default: ''
+      run_id:
+        description: '🆔 GitHub Actions Run ID (to download logs from that run)'
+        required: false
+        type: string
+        default: ''
+      repo:
+        description: '📦 Repository where the run lives (owner/repo) – defaults to current repo'
+        required: false
+        type: string
+        default: ${{ github.repository }}
       filename:
-        description: '💾 Custom filename (optional – auto‑detected if empty)'
+        description: '💾 Custom filename (optional)'
         required: false
         type: string
         default: ''
@@ -23,66 +34,98 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: write          # needed to push the branch
+      contents: write
     env:
       BRANCH_NAME: download-${{ github.run_id }}
       HARD_LIMIT_MB: 90
 
     steps:
-      # ---------- disk space ----------
       - name: 💾 Disk space check
         run: |
           AVAIL_MB=$(df /home/runner --output=avail | tail -1 | awk '{print int($1/1024)}')
           echo "📀 Free: ${AVAIL_MB} MB"
-          if [[ $AVAIL_MB -lt 2048 ]]; then
-            echo "❌ <2 GB free – aborting"
-            exit 1
-          fi
+          [[ $AVAIL_MB -lt 2048 ]] && { echo "❌ <2 GB free"; exit 1; }
 
-      # ---------- GitHub App token (all repos) ----------
-      - name: 🔐 Get GitHub App token (all repositories)
+      # ---------- GitHub App token ----------
+      - name: 🔐 Get GitHub App token (all repos)
         id: token
         uses: tibdex/github-app-token@v2
         with:
           app_id: ${{ secrets.APP_ID }}
           private_key: ${{ secrets.APP_PRIVATE_KEY }}
-          # no 'repository' given → token works for every repo where the app is installed
 
-      # ---------- download ----------
+      # ---------- If run_id is given, fetch fresh logs download URL ----------
+      - name: 🔄 Fetch logs download URL
+        id: get-log-url
+        if: ${{ inputs.run_id != '' }}
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ inputs.repo }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          # GitHub API returns a 302 redirect to the temporary download URL
+          URL=$(curl -sS -I \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/logs" \
+            | grep -i '^location:' | sed 's/^location: //i' | tr -d '\r')
+          if [[ -z "$URL" ]]; then
+            echo "❌ Could not fetch logs download URL"
+            exit 1
+          fi
+          echo "✅ Fresh logs URL: ${URL:0:120}..."
+          echo "download_url=$URL" >> $GITHUB_OUTPUT
+
+      # ---------- Download ----------
       - name: ⬇️ Download file
         id: download
         env:
           TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          URL="${{ inputs.url }}"
-          CUSTOM_FILENAME="${{ inputs.filename }}"
 
-          # Determine filename
+          # Determine which URL to download
+          if [[ -n "${{ inputs.run_id }}" ]]; then
+            DOWNLOAD_URL="${{ steps.get-log-url.outputs.download_url }}"
+          elif [[ -n "${{ inputs.url }}" ]]; then
+            DOWNLOAD_URL="${{ inputs.url }}"
+          else
+            echo "❌ No download URL or run ID provided"
+            exit 1
+          fi
+
+          CUSTOM_FILENAME="${{ inputs.filename }}"
           if [[ -n "$CUSTOM_FILENAME" ]]; then
             FILENAME="$CUSTOM_FILENAME"
           else
-            FILENAME=$(basename "$URL" | sed 's/?.*//')
-            if [[ -z "$FILENAME" || "$FILENAME" == "/" ]]; then
-              FILENAME="download"
-            fi
+            FILENAME=$(basename "$DOWNLOAD_URL" | sed 's/?.*//')
+            [[ -z "$FILENAME" || "$FILENAME" == "/" ]] && FILENAME="download"
           fi
 
           echo "📥 Downloading → $FILENAME"
           mkdir -p downloads
           OUTPUT="downloads/$FILENAME"
 
-          # Retry up to 3 times
+          # For logs URL, do NOT send Authorization header (pre-signed)
+          if [[ "$DOWNLOAD_URL" == *results-receiver* ]]; then
+            AUTH_HEADER=()
+          else
+            # For normal URLs, use token only if it's a GitHub API or raw.githubusercontent.com
+            if [[ "$DOWNLOAD_URL" == https://api.github.com/* ]] || [[ "$DOWNLOAD_URL" == https://raw.githubusercontent.com/* ]]; then
+              AUTH_HEADER=(-H "Authorization: Bearer $TOKEN")
+            else
+              AUTH_HEADER=()
+            fi
+          fi
+
           for attempt in 1 2 3; do
             echo "🔄 Attempt $attempt"
             HTTP_CODE=$(curl -sS -w "%{http_code}" -L \
               --max-time 1800 \
-              -H "Authorization: Bearer $TOKEN" \
-              -o "$OUTPUT" "$URL")
+              "${AUTH_HEADER[@]}" \
+              -o "$OUTPUT" "$DOWNLOAD_URL")
             echo "   HTTP $HTTP_CODE"
-            if [[ "$HTTP_CODE" == "200" ]]; then
-              break
-            fi
+            [[ "$HTTP_CODE" == "200" ]] && break
             sleep $((5 * attempt))
           done
 
@@ -96,20 +139,18 @@ jobs:
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "output=$OUTPUT" >> $GITHUB_OUTPUT
 
-      # ---------- split if needed ----------
+      # ---------- split ----------
       - name: ✂️ Split large files
         id: split
         run: |
           INPUT="${{ steps.download.outputs.output }}"
           FILENAME="${{ steps.download.outputs.filename }}"
           THRESHOLD="${{ inputs.split_threshold_mb }}"
-          HARD_LIMIT="$HARD_LIMIT_MB"
-
+          HARD_LIMIT="${{ env.HARD_LIMIT_MB }}"
           mkdir -p staging
           SIZE=$(stat -c%s "$INPUT")
           SIZE_MB=$((SIZE / 1048576))
 
-          # Force split if file exceeds the hard GitHub limit
           if [[ "$THRESHOLD" -eq 0 || "$THRESHOLD" -gt "$HARD_LIMIT" ]]; then
             if [[ $SIZE -gt $((HARD_LIMIT * 1048576)) ]]; then
               THRESHOLD="$HARD_LIMIT"
@@ -131,10 +172,11 @@ jobs:
             echo "base=archive.zip" >> $GITHUB_OUTPUT
           else
             cp "$INPUT" "staging/$FILENAME"
+            echo "📁 Under threshold – single file kept"
             echo "split=false" >> $GITHUB_OUTPUT
           fi
 
-      # ---------- push to orphan branch ----------
+      # ---------- push ----------
       - name: 🚀 Push branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -143,15 +185,12 @@ jobs:
           TMP=$(mktemp -d)
           cp -a staging/* "$TMP/"
           cd "$TMP"
-
           git init --initial-branch=main
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add origin "$REPO_URL"
-
           git add .
           git commit -m "download: ${{ steps.download.outputs.filename }}" || true
-
           for i in 1 2 3 4; do
             if git push origin "HEAD:${BRANCH_NAME}" --force; then
               echo "✅ Push succeeded"
@@ -159,24 +198,17 @@ jobs:
             fi
             sleep $((2 ** (i-1)))
           done
+          git ls-remote origin "refs/heads/${BRANCH_NAME}" | grep -q . || { echo "❌ Branch not found"; exit 1; }
 
-          if ! git ls-remote origin "refs/heads/${BRANCH_NAME}" | grep -q .; then
-            echo "❌ Branch not found after push – something went wrong."
-            exit 1
-          fi
-
-      # ---------- summary ----------
       - name: 📋 Summary
         run: |
-          REPO="${{ github.repository }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📄 File: ${{ steps.download.outputs.filename }}"
           echo "🌿 Branch: ${BRANCH_NAME}"
           if [[ "${{ steps.split.outputs.split }}" == "true" ]]; then
-            echo "📦 Split parts: https://github.com/${REPO}/tree/${BRANCH_NAME}"
+            echo "📦 Split parts: https://github.com/${{ github.repository }}/tree/${BRANCH_NAME}"
           else
-            echo "⬇️ Direct download: https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${{ steps.download.outputs.filename }}"
+            echo "⬇️ Direct download: https://raw.githubusercontent.com/${{ github.repository }}/${BRANCH_NAME}/${{ steps.download.outputs.filename }}"
           fi
-          echo "📥 ZIP of everything: https://github.com/${REPO}/archive/refs/heads/${BRANCH_NAME}.zip"
+          echo "📥 ZIP of everything: https://github.com/${{ github.repository }}/archive/refs/heads/${BRANCH_NAME}.zip"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "ℹ️  The branch will be automatically deleted after 3 hours by the cleanup workflow (if you have one)."
