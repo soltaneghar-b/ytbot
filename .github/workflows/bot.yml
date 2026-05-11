@@ -69,4 +69,10 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ secrets.INSTALLATION_ID }}
+          STATE_BRANCH: 'bot-state'
+          PRIVATE_REPO: 'ytbot_rust'
+          DB_BRANCH: 'bot-db'
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+          REQUIRED_CHANNEL_ID: ${{ secrets.REQUIRED_CHANNEL_ID }}
+          REQUIRED_CHANNEL_LINK: ${{ secrets.REQUIRED_CHANNEL_LINK }}
         run: ./yt-streamer-bot
