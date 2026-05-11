@@ -1,0 +1,49 @@
+name: 📥 Fetch & Release Binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: 'Direct download URL of the new binary (leave empty to use the BINARY_DOWNLOAD_URL secret)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  fetch-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine download URL
+        id: url
+        run: |
+          if [ -n "${{ github.event.inputs.download_url }}" ]; then
+            echo "DOWNLOAD_URL=${{ github.event.inputs.download_url }}" >> $GITHUB_OUTPUT
+          else
+            echo "DOWNLOAD_URL=${{ secrets.BINARY_DOWNLOAD_URL }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📥 Download binary
+        run: |
+          echo "⬇️ Downloading binary from: ${{ steps.url.outputs.DOWNLOAD_URL }}"
+          curl -fSL --retry 3 -o yt-streamer-bot "${{ steps.url.outputs.DOWNLOAD_URL }}"
+          chmod +x yt-streamer-bot
+          echo "✅ Download complete"
+
+      - name: 📤 Push binary to bot-binary branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin bot-binary 2>/dev/null || true
+          git checkout --orphan bot-binary-temp
+          git rm -rf .
+          cp "$GITHUB_WORKSPACE/yt-streamer-bot" .
+          git add yt-streamer-bot
+          git commit -m "Update bot binary [skip ci]"
+          git push origin bot-binary-temp:bot-binary --force
