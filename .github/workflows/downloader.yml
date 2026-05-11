@@ -1,4 +1,4 @@
-name: 🔽 General File Downloader
+name: 🔽 General File Downloader (with Auth)
 
 on:
   workflow_dispatch:
@@ -9,6 +9,11 @@ on:
         type: string
       filename:
         description: '💾 File name (optional, auto-detected if empty)'
+        required: false
+        type: string
+        default: ''
+      auth_token:
+        description: '🔐 Auth token (GitHub token or PAT). Use secrets.GITHUB_TOKEN for GitHub artifacts / logs'
         required: false
         type: string
         default: ''
@@ -27,9 +32,8 @@ jobs:
       contents: write
     env:
       BRANCH_NAME: download-${{ github.run_id }}
-      HARD_LIMIT_MB: 90   # GitHub file size limit is 100 MB — we split at 90 MB
+      HARD_LIMIT_MB: 90
     steps:
-      # ---------- disk check ----------
       - name: 💾 Check available disk space
         run: |
           AVAIL_KB=$(df /home/runner | awk 'NR==2 {print $4}')
@@ -40,6 +44,39 @@ jobs:
             exit 1
           fi
 
+      # ---------- (optional) refresh GitHub‑signed log URL ----------
+      - name: 🔄 Refresh GitHub Actions log download URL
+        id: refresh
+        run: |
+          set -euo pipefail
+          URL="${{ github.event.inputs.url }}"
+          TOKEN="${{ github.event.inputs.auth_token }}"
+
+          # Only refresh if it’s a GitHub Actions log endpoint and token is present
+          if [[ "$URL" =~ ^https://results-receiver\.actions\.githubusercontent\.com/rest/runs/.*/logs ]] && [[ -n "$TOKEN" ]]; then
+            echo "🔍 Detected GitHub Actions log URL – fetching fresh download link..."
+            # Extract the run ID from the URL
+            RUN_ID=$(echo "$URL" | sed -n 's|.*/runs/\([0-9]\+\)/logs.*|\1|p')
+            if [[ -z "$RUN_ID" ]]; then
+              echo "⚠️ Could not extract run ID, using original URL"
+            else
+              # Use the GitHub API to obtain a new signed download URL
+              FRESH=$(curl -sS -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/logs" \
+                -o /dev/null -w '%{redirect_url}')
+              if [[ -n "$FRESH" ]]; then
+                echo "✅ New download URL obtained"
+                echo "url=$FRESH" >> $GITHUB_OUTPUT
+              else
+                echo "⚠️ Could not refresh URL, using original"
+                echo "url=$URL" >> $GITHUB_OUTPUT
+              fi
+            fi
+          else
+            echo "url=$URL" >> $GITHUB_OUTPUT
+          fi
+
       # ---------- download ----------
       - name: ⬇️ Download file
         id: download
@@ -47,14 +84,14 @@ jobs:
           set -euo pipefail
           exec 2>&1
 
-          URL="${{ github.event.inputs.url }}"
+          URL="${{ steps.refresh.outputs.url || github.event.inputs.url }}"
           CUSTOM_FILENAME="${{ github.event.inputs.filename }}"
+          TOKEN="${{ github.event.inputs.auth_token }}"
 
-          # Determine output filename
+          # Determine filename
           if [[ -n "$CUSTOM_FILENAME" ]]; then
             FILENAME="$CUSTOM_FILENAME"
           else
-            # Try to extract filename from URL
             FILENAME=$(basename "$URL" | cut -d'?' -f1)
             if [[ -z "$FILENAME" || "$FILENAME" == "/" ]]; then
               FILENAME="download"
@@ -63,18 +100,24 @@ jobs:
 
           echo "🔗 URL: $URL"
           echo "📄 Target filename: $FILENAME"
+          echo "🔐 Token present: $([[ -n "$TOKEN" ]] && echo 'yes' || echo 'no')"
 
           TEMP_DIR="./downloads"
           mkdir -p "$TEMP_DIR"
           OUTPUT="$TEMP_DIR/$FILENAME"
 
-          # Download with retries
+          # Build curl headers
+          HEADERS=(-H "User-Agent: GitHub-Actions-Downloader")
+          if [[ -n "$TOKEN" ]]; then
+            HEADERS+=(-H "Authorization: Bearer $TOKEN")
+          fi
+
           HTTP_CODE=""
           for attempt in 1 2 3; do
             echo "📥 Attempt $attempt/3"
             HTTP_CODE=$(curl -sS -w "%{http_code}" -L \
               --connect-timeout 30 --max-time 1800 \
-              -o "$OUTPUT" "$URL" 2>&1 | tail -1)
+              "${HEADERS[@]}" -o "$OUTPUT" "$URL" 2>&1 | tail -1)
             echo "   HTTP status: $HTTP_CODE"
             if [[ "$HTTP_CODE" == "200" ]]; then
               break
@@ -101,7 +144,7 @@ jobs:
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "output_file=$OUTPUT" >> $GITHUB_OUTPUT
 
-      # ---------- split if necessary ----------
+      # ---------- split ----------
       - name: ✂️ Split large files
         id: split
         run: |
@@ -117,14 +160,13 @@ jobs:
           SIZE=$(stat -c%s "$INPUT_FILE")
           SIZE_MB=$((SIZE / 1048576))
 
-          # Determine split size
           SPLIT_SIZE="$THRESHOLD_MB"
           if [[ "$THRESHOLD_MB" -eq 0 || "$THRESHOLD_MB" -gt "$HARD_LIMIT_MB" ]]; then
             if [[ $SIZE -gt $((HARD_LIMIT_MB * 1048576)) ]]; then
               SPLIT_SIZE="$HARD_LIMIT_MB"
-              echo "🛡️ File exceeds hard limit → force-split at ${SPLIT_SIZE} MB"
+              echo "🛡️ Force‑splitting at ${SPLIT_SIZE} MB"
             else
-              echo "📁 File size ${SIZE_MB} MB — no split needed"
+              echo "📁 File size ${SIZE_MB} MB – no split needed"
               cp "$INPUT_FILE" "$STAGING_DIR/$FILENAME"
               echo "split=false" >> $GITHUB_OUTPUT
               exit 0
@@ -132,22 +174,21 @@ jobs:
           fi
 
           if [[ $SPLIT_SIZE -gt 0 && $SIZE -gt $((SPLIT_SIZE * 1048576)) ]]; then
-            echo "✂️ Splitting ${SIZE_MB} MB file into ${SPLIT_SIZE} MB parts..."
+            echo "✂️ Splitting into ${SPLIT_SIZE} MB parts..."
             cd "$STAGING_DIR"
             cp "$OLDPWD/$INPUT_FILE" "./$FILENAME"
             zip -r -s "${SPLIT_SIZE}m" "archive.zip" "$FILENAME"
             rm -f "$FILENAME"
             cd "$OLDPWD"
-            echo "Split completed"
             echo "split=true" >> $GITHUB_OUTPUT
             echo "base_name=archive.zip" >> $GITHUB_OUTPUT
           else
             cp "$INPUT_FILE" "$STAGING_DIR/$FILENAME"
-            echo "📁 File under split threshold — single file kept"
+            echo "📁 Under threshold – single file kept"
             echo "split=false" >> $GITHUB_OUTPUT
           fi
 
-      # ---------- push to orphan branch ----------
+      # ---------- push ----------
       - name: 🚀 Push to orphan branch
         run: |
           set -euo pipefail
@@ -179,17 +220,15 @@ jobs:
           done
 
           if ! $PUSH_OK; then
-            echo "❌ Push failed after multiple attempts"
+            echo "❌ Push failed"
             exit 1
           fi
-
           if ! git ls-remote origin "refs/heads/${BRANCH_NAME}" | grep -q "${BRANCH_NAME}"; then
             echo "❌ Branch not found after push"
             exit 1
           fi
           echo "✅ Branch '${BRANCH_NAME}' pushed"
 
-      # ---------- summary ----------
       - name: 📋 Summary
         run: |
           REPO="${{ github.repository }}"
@@ -199,13 +238,9 @@ jobs:
 
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           if [[ "$SPLIT" == "true" ]]; then
-            echo "📦 Split archive parts:"
-            echo "   https://github.com/${REPO}/tree/${BRANCH}"
+            echo "📦 Split parts: https://github.com/${REPO}/tree/${BRANCH}"
           else
-            echo "📄 Direct download link:"
-            echo "   https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILENAME}"
+            echo "📄 Direct link: https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILENAME}"
           fi
-          echo "📥 Full ZIP download (entire branch):"
-          echo "   https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip"
+          echo "📥 Download ZIP: https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "ℹ️  This branch will be automatically deleted after 3 hours by the cleanup workflow (if configured)."
