@@ -65,7 +65,7 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           # no 'owner' or 'repositories' → token works for all installations
 
-      - name: 🔄 Fetch fresh logs download URL (if run_id given)
+      - name: 🔄 Fetch fresh logs download URL
         id: get-log-url
         if: ${{ inputs.run_id != '' }}
         env:
@@ -75,18 +75,32 @@ jobs:
           [[ -z "$REPO" ]] && REPO="${{ github.repository }}"
           RUN_ID="${{ inputs.run_id }}"
 
-          URL=$(curl -sS -I \
+          echo "🔍 Fetching logs for $REPO / run $RUN_ID"
+          RESPONSE=$(curl -sS -I -L \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/logs" \
-            | grep -i '^location:' | sed 's/^location: //i' | tr -d '\r')
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/logs")
+          HTTP_CODE=$(echo "$RESPONSE" | head -1 | awk '{print $2}')
+          echo "   HTTP status: $HTTP_CODE"
 
-          if [[ -z "$URL" ]]; then
-            echo "❌ Could not fetch logs download URL"
-            exit 1
+          if [[ "$HTTP_CODE" == "302" ]]; then
+            URL=$(echo "$RESPONSE" | grep -i '^location:' | sed 's/^location: //i' | tr -d '\r')
+            if [[ -n "$URL" ]]; then
+              echo "✅ Fresh logs URL: ${URL:0:120}..."
+              echo "download_url=$URL" >> $GITHUB_OUTPUT
+              exit 0
+            fi
           fi
-          echo "✅ Fresh logs URL: ${URL:0:120}..."
-          echo "download_url=$URL" >> $GITHUB_OUTPUT
+
+          # If we're still here, something went wrong
+          echo "❌ Failed to get download URL. Full response:"
+          echo "$RESPONSE"
+          echo "---"
+          # Also try to get error body (if any)
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/logs" || true
+          exit 1
 
       - name: ⬇️ Download file
         id: download
