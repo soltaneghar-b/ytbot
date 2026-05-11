@@ -1,4 +1,4 @@
-name: 🔽 General File Downloader (with Auth)
+name: 🔽 General File Downloader (GitHub App)
 
 on:
   workflow_dispatch:
@@ -12,11 +12,10 @@ on:
         required: false
         type: string
         default: ''
-      auth_token:
-        description: '🔐 Auth token (GitHub token or PAT). Use secrets.GITHUB_TOKEN for GitHub artifacts / logs'
-        required: false
+      target_repo:
+        description: '🎯 Repository where the app is installed (owner/repo)'
+        required: true
         type: string
-        default: ''
       split_threshold_mb:
         description: '📦 Split files larger than (MB) — 0 = never'
         required: false
@@ -33,6 +32,7 @@ jobs:
     env:
       BRANCH_NAME: download-${{ github.run_id }}
       HARD_LIMIT_MB: 90
+
     steps:
       - name: 💾 Check available disk space
         run: |
@@ -44,26 +44,34 @@ jobs:
             exit 1
           fi
 
+      # ---------- Generate GitHub App token ----------
+      - name: 🔐 Generate GitHub App installation token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+          repository: ${{ github.event.inputs.target_repo }}
+
       # ---------- (optional) refresh GitHub‑signed log URL ----------
       - name: 🔄 Refresh GitHub Actions log download URL
         id: refresh
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           URL="${{ github.event.inputs.url }}"
-          TOKEN="${{ github.event.inputs.auth_token }}"
 
-          # Only refresh if it’s a GitHub Actions log endpoint and token is present
-          if [[ "$URL" =~ ^https://results-receiver\.actions\.githubusercontent\.com/rest/runs/.*/logs ]] && [[ -n "$TOKEN" ]]; then
+          if [[ "$URL" =~ ^https://results-receiver\.actions\.githubusercontent\.com/rest/runs/.*/logs ]]; then
             echo "🔍 Detected GitHub Actions log URL – fetching fresh download link..."
-            # Extract the run ID from the URL
             RUN_ID=$(echo "$URL" | sed -n 's|.*/runs/\([0-9]\+\)/logs.*|\1|p')
             if [[ -z "$RUN_ID" ]]; then
               echo "⚠️ Could not extract run ID, using original URL"
+              echo "url=$URL" >> $GITHUB_OUTPUT
             else
-              # Use the GitHub API to obtain a new signed download URL
               FRESH=$(curl -sS -H "Authorization: Bearer $TOKEN" \
                 -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/logs" \
+                "https://api.github.com/repos/${{ github.event.inputs.target_repo }}/actions/runs/$RUN_ID/logs" \
                 -o /dev/null -w '%{redirect_url}')
               if [[ -n "$FRESH" ]]; then
                 echo "✅ New download URL obtained"
@@ -80,13 +88,14 @@ jobs:
       # ---------- download ----------
       - name: ⬇️ Download file
         id: download
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           exec 2>&1
 
           URL="${{ steps.refresh.outputs.url || github.event.inputs.url }}"
           CUSTOM_FILENAME="${{ github.event.inputs.filename }}"
-          TOKEN="${{ github.event.inputs.auth_token }}"
 
           # Determine filename
           if [[ -n "$CUSTOM_FILENAME" ]]; then
@@ -100,24 +109,19 @@ jobs:
 
           echo "🔗 URL: $URL"
           echo "📄 Target filename: $FILENAME"
-          echo "🔐 Token present: $([[ -n "$TOKEN" ]] && echo 'yes' || echo 'no')"
+          echo "🔐 Authenticating with GitHub App token"
 
           TEMP_DIR="./downloads"
           mkdir -p "$TEMP_DIR"
           OUTPUT="$TEMP_DIR/$FILENAME"
-
-          # Build curl headers
-          HEADERS=(-H "User-Agent: GitHub-Actions-Downloader")
-          if [[ -n "$TOKEN" ]]; then
-            HEADERS+=(-H "Authorization: Bearer $TOKEN")
-          fi
 
           HTTP_CODE=""
           for attempt in 1 2 3; do
             echo "📥 Attempt $attempt/3"
             HTTP_CODE=$(curl -sS -w "%{http_code}" -L \
               --connect-timeout 30 --max-time 1800 \
-              "${HEADERS[@]}" -o "$OUTPUT" "$URL" 2>&1 | tail -1)
+              -H "Authorization: Bearer $TOKEN" \
+              -o "$OUTPUT" "$URL" 2>&1 | tail -1)
             echo "   HTTP status: $HTTP_CODE"
             if [[ "$HTTP_CODE" == "200" ]]; then
               break
@@ -166,7 +170,6 @@ jobs:
               SPLIT_SIZE="$HARD_LIMIT_MB"
               echo "🛡️ Force‑splitting at ${SPLIT_SIZE} MB"
             else
-              echo "📁 File size ${SIZE_MB} MB – no split needed"
               cp "$INPUT_FILE" "$STAGING_DIR/$FILENAME"
               echo "split=false" >> $GITHUB_OUTPUT
               exit 0
@@ -190,9 +193,11 @@ jobs:
 
       # ---------- push ----------
       - name: 🚀 Push to orphan branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          REPO_URL="https://x-access-token:$GITHUB_TOKEN@github.com/${{ github.repository }}.git"
           STAGING_DIR="./staging"
           ORPHAN_DIR=$(mktemp -d)
 
