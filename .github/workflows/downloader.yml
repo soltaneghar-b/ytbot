@@ -14,10 +14,10 @@ on:
         type: string
         default: ''
       repo:
-        description: '📦 Repo where the run lives (owner/repo). Empty = current repo.'
-        required: false
+        description: '📦 Repo where the run lives (owner/repo) — REQUIRED if run_id is set'
+        required: true
         type: string
-        default: ''
+        default: ''          # still empty in the UI, but the "required: true" forces the user to type something
       filename:
         description: '💾 Custom filename (optional)'
         required: false
@@ -34,8 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: write        # to push the branch
-      actions: read          # to read logs / download URL
+      contents: write
+      actions: read
     env:
       BRANCH_NAME: download-${{ github.run_id }}
       HARD_LIMIT_MB: 90
@@ -43,7 +43,6 @@ jobs:
     steps:
       - name: 💾 Disk space check
         run: |
-          # Use df -k to get available space in 1K-blocks, then convert to MB
           AVAIL_KB=$(df -k /home/runner | tail -1 | awk '{print $4}')
           if [[ -z "$AVAIL_KB" ]]; then
             echo "⚠️  Could not determine free space; proceeding anyway"
@@ -63,16 +62,14 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          # no 'owner' or 'repositories' → token works for all installations
 
-      - name: 🔄 Fetch fresh logs download URL
+      - name: 🔄 Fetch fresh logs download URL (if run_id given)
         id: get-log-url
         if: ${{ inputs.run_id != '' }}
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          REPO="${{ inputs.repo }}"
-          [[ -z "$REPO" ]] && REPO="${{ github.repository }}"
+          REPO="${{ inputs.repo }}"   # now guaranteed to be non-empty
           RUN_ID="${{ inputs.run_id }}"
 
           echo "🔍 Fetching logs for $REPO / run $RUN_ID"
@@ -92,11 +89,10 @@ jobs:
             fi
           fi
 
-          # If we're still here, something went wrong
+          # If we get here, something went wrong
           echo "❌ Failed to get download URL. Full response:"
           echo "$RESPONSE"
           echo "---"
-          # Also try to get error body (if any)
           curl -sS -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/logs" || true
@@ -129,7 +125,6 @@ jobs:
           mkdir -p downloads
           OUTPUT="downloads/$FILENAME"
 
-          # No extra auth header for pre‑signed URLs
           if [[ "$DOWNLOAD_URL" == *results-receiver* ]]; then
             AUTH_HEADER=()
           elif [[ "$DOWNLOAD_URL" == https://api.github.com/* ]] || [[ "$DOWNLOAD_URL" == https://raw.githubusercontent.com/* ]]; then
@@ -195,7 +190,7 @@ jobs:
 
       - name: 🚀 Push branch
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # for git push
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           REPO_URL="https://x-access-token:$GITHUB_TOKEN@github.com/${{ github.repository }}.git"
           TMP=$(mktemp -d)
