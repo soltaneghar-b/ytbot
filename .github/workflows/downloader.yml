@@ -14,7 +14,7 @@ on:
         type: string
         default: ''
       repo:
-        description: '📦 Repo where the run lives (owner/repo). Leave empty to use the current repo.'
+        description: '📦 Repo where the run lives (owner/repo). Empty = current repo.'
         required: false
         type: string
         default: ''
@@ -46,12 +46,52 @@ jobs:
           echo "📀 Free: ${AVAIL_MB} MB"
           [[ $AVAIL_MB -lt 2048 ]] && { echo "❌ <2 GB free"; exit 1; }
 
-      - name: 🔐 Get GitHub App token (all repos)
+      - name: 🔐 Generate GitHub App installation token
         id: token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.APP_ID }}
-          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          # ---------- helpers ----------
+          base64url() { openssl base64 -e -A | tr '+/' '-_' | tr -d '='; }
+          sign() {
+            echo -n "$1" | openssl dgst -binary -sha256 -sign <(echo "$PRIVATE_KEY") | base64url
+          }
+
+          # ---------- create JWT ----------
+          NOW=$(date +%s)
+          HEADER='{"alg":"RS256","typ":"JWT"}'
+          PAYLOAD="{\"iat\":$NOW,\"exp\":$((NOW+600)),\"iss\":\"$APP_ID\"}"
+          HEADER_B64=$(echo -n "$HEADER" | base64url)
+          PAYLOAD_B64=$(echo -n "$PAYLOAD" | base64url)
+          SIGNATURE=$(sign "$HEADER_B64.$PAYLOAD_B64")
+          JWT="$HEADER_B64.$PAYLOAD_B64.$SIGNATURE"
+
+          echo "🔑 JWT generated"
+
+          # ---------- get installation token ----------
+          INSTALLATION_ID=$(curl -s -H "Authorization: Bearer $JWT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/app/installations \
+            | jq -r '.[0].id // empty')
+          if [[ -z "$INSTALLATION_ID" ]]; then
+            echo "❌ Could not find any installation of this app. Is it installed?"
+            exit 1
+          fi
+          echo "📦 Installation ID: $INSTALLATION_ID"
+
+          TOKEN=$(curl -s -X POST \
+            -H "Authorization: Bearer $JWT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/app/installations/$INSTALLATION_ID/access_tokens \
+            | jq -r '.token // empty')
+          if [[ -z "$TOKEN" ]]; then
+            echo "❌ Failed to obtain installation token"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          echo "✅ Installation token generated"
 
       - name: 🔄 Fetch fresh logs download URL (if run_id given)
         id: get-log-url
@@ -59,12 +99,10 @@ jobs:
         env:
           TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          # Use provided repo or fallback to current repository
           REPO="${{ inputs.repo }}"
           [[ -z "$REPO" ]] && REPO="${{ github.repository }}"
           RUN_ID="${{ inputs.run_id }}"
 
-          # GitHub API redirects (302) to the temporary download URL
           URL=$(curl -sS -I \
             -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -84,14 +122,12 @@ jobs:
           TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-
-          # Decide which URL to download
           if [[ -n "${{ inputs.run_id }}" ]]; then
             DOWNLOAD_URL="${{ steps.get-log-url.outputs.download_url }}"
           elif [[ -n "${{ inputs.url }}" ]]; then
             DOWNLOAD_URL="${{ inputs.url }}"
           else
-            echo "❌ No download URL or run ID provided"
+            echo "❌ No download URL or run ID"
             exit 1
           fi
 
@@ -107,24 +143,19 @@ jobs:
           mkdir -p downloads
           OUTPUT="downloads/$FILENAME"
 
-          # For GitHub log URLs, do NOT send Authorization header (pre‑signed)
+          # No auth header for pre‑signed URLs
           if [[ "$DOWNLOAD_URL" == *results-receiver* ]]; then
             AUTH_HEADER=()
+          elif [[ "$DOWNLOAD_URL" == https://api.github.com/* ]] || [[ "$DOWNLOAD_URL" == https://raw.githubusercontent.com/* ]]; then
+            AUTH_HEADER=(-H "Authorization: Bearer $TOKEN")
           else
-            # For GitHub API or raw.githubusercontent.com, use token
-            if [[ "$DOWNLOAD_URL" == https://api.github.com/* ]] || [[ "$DOWNLOAD_URL" == https://raw.githubusercontent.com/* ]]; then
-              AUTH_HEADER=(-H "Authorization: Bearer $TOKEN")
-            else
-              AUTH_HEADER=()
-            fi
+            AUTH_HEADER=()
           fi
 
           for attempt in 1 2 3; do
             echo "🔄 Attempt $attempt"
-            HTTP_CODE=$(curl -sS -w "%{http_code}" -L \
-              --max-time 1800 \
-              "${AUTH_HEADER[@]}" \
-              -o "$OUTPUT" "$DOWNLOAD_URL")
+            HTTP_CODE=$(curl -sS -w "%{http_code}" -L --max-time 1800 \
+              "${AUTH_HEADER[@]}" -o "$OUTPUT" "$DOWNLOAD_URL")
             echo "   HTTP $HTTP_CODE"
             [[ "$HTTP_CODE" == "200" ]] && break
             sleep $((5 * attempt))
