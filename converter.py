@@ -53,14 +53,12 @@ def normalize_quality(output_type, quality_input):
         quality = quality_input.lower().strip()
         quality_map = {'4k':'1080p','2k':'1080p','2160p':'1080p','1440p':'1080p','240p':'360p'}
         if output_type == 'audio':
-            # Strip 'bps' if present, and ensure ends with 'k'
             if quality.endswith('bps'):
                 quality = quality[:-3]
             if not quality.endswith('k'):
                 quality += 'k'
             if quality in AUDIO_BITRATES:
                 return quality
-            # Try numeric fallback
             try:
                 num = int(''.join(filter(str.isdigit, quality)))
                 best = min(AUDIO_BITRATES, key=lambda b: abs(int(b[:-1]) - num))
@@ -134,13 +132,24 @@ def attempt_conversion():
             print(f"❌ API error ({response.status_code}): {response.text[:300]}")
             if response.status_code == 400:
                 if OUTPUT_TYPE == 'audio':
-                    payload["audio"]["bitrate"] = "192k"    # API expects <number>k
+                    payload["audio"]["bitrate"] = "192k"
                 else:
                     payload["output"]["quality"] = "720p"
                 response = session.post(API_ENDPOINT, json=payload, headers=HEADERS, timeout=30)
                 if response.status_code != 200:
                     print(f"❌ Fallback also failed ({response.status_code})")
                     return None, None, None, None
+            elif response.status_code == 500:
+                # Check for non-retryable error: "Failed to fetch video metadata"
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('error', {}).get('message', '')
+                    if 'Failed to fetch video metadata' in error_msg:
+                        print("⛔ Video metadata unavailable (geo-restricted / private / age-limited).")
+                        return None, None, None, "METADATA_FAIL"
+                except Exception:
+                    pass
+                return None, None, None, None
             else:
                 return None, None, None, None
         data = safe_json(response)
@@ -224,6 +233,7 @@ final_download_url = None
 final_subtitle_url = None
 final_title = ""
 final_status_url = ""
+permanent_fail = False
 
 for retry_attempt in range(1, CONVERSION_RETRIES + 1):
     print(f"\n🔄 Conversion attempt {retry_attempt}/{CONVERSION_RETRIES}")
@@ -235,13 +245,23 @@ for retry_attempt in range(1, CONVERSION_RETRIES + 1):
         final_status_url = status_url
         break
     else:
+        # Special marker for permanent metadata failure
+        if status_url == "METADATA_FAIL":
+            print("⛔ Permanent metadata failure – not retrying further.")
+            permanent_fail = True
+            break
         if retry_attempt < CONVERSION_RETRIES:
-            wait = 10
+            wait = 10 * retry_attempt  # exponential backoff: 10, 20, 30 seconds
             print(f"🔁 Conversion failed, retrying in {wait} seconds...")
             time.sleep(wait)
         else:
             print("❌ All conversion attempts exhausted.")
             sys.exit(1)
+
+if permanent_fail:
+    # Output a user-friendly message that the bot can relay (optional)
+    print("USER_ERROR: ویدیو در دسترس نیست (محدودیت جغرافیایی یا سنی). لطفاً ویدیوی دیگری امتحان کنید.")
+    sys.exit(1)
 
 if not final_download_url:
     print("❌ Conversion did not produce a download URL after retries.")
