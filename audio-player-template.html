@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio Player</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0a0a0a; display:flex; justify-content:center; align-items:center; min-height:100vh; font-family:system-ui, sans-serif; }
+  
+  .player { background:#181818; padding:24px; border-radius:16px; color:#fff; width:90%; max-width:400px; box-shadow:0 10px 30px rgba(0,0,0,0.5); }
+  
+  /* Progress Bar Customization */
+  input[type=range] { width:100%; cursor:pointer; accent-color:#ff3b30; }
+  
+  .controls { display:flex; align-items:center; gap:15px; margin-top:20px; }
+  .btn { background:transparent; border:none; color:#fff; font-size:24px; cursor:pointer; }
+  
+  .time-info { display:flex; justify-content:space-between; font-size:12px; color:#aaa; margin-top:8px; }
+  .download-btn { display:block; text-align:center; background:#ff3b30; color:#fff; padding:12px; border-radius:8px; text-decoration:none; margin-top:20px; font-weight:bold; }
+  .download-btn:hover { background:#e0352b; }
+</style>
+</head>
+<body>
+
+<div class="player">
+  <audio id="audioElement" src="__AUDIO_URL__"></audio>
+  
+  <h3>🎵 Audio</h3>
+  
+  <input type="range" id="progressBar" value="0" min="0" max="100">
+  <div class="time-info">
+    <span id="currentTime">0:00</span>
+    <span id="duration">0:00</span>
+  </div>
+
+  <div class="controls">
+    <button class="btn" id="playBtn">▶</button>
+  </div>
+
+  <a class="download-btn" href="__ZIP_URL__" download>⬇ Download ZIP</a>
+</div>
+
+<script>
+  const audio = document.getElementById('audioElement');
+  const playBtn = document.getElementById('playBtn');
+  const progressBar = document.getElementById('progressBar');
+  const curTimeDisplay = document.getElementById('currentTime');
+  const durDisplay = document.getElementById('duration');
+
+  // Play/Pause Toggle
+  playBtn.addEventListener('click', () => {
+    if (audio.paused) {
+      audio.play();
+      playBtn.textContent = '⏸';
+    } else {
+      audio.pause();
+      playBtn.textContent = '▶';
+    }
+  });
+
+  // Update progress bar
+  audio.addEventListener('timeupdate', () => {
+    const progress = (audio.currentTime / audio.duration) * 100;
+    progressBar.value = progress || 0;
+    curTimeDisplay.textContent = formatTime(audio.currentTime);
+  });
+
+  // Seek functionality
+  progressBar.addEventListener('input', (e) => {
+    audio.currentTime = (e.target.value / 100) * audio.duration;
+  });
+
+  // Set duration text when metadata loads
+  audio.addEventListener('loadedmetadata', () => {
+    durDisplay.textContent = formatTime(audio.duration);
+  });
+
+  function formatTime(s) {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return m + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+</script>
+</body>
+</html>
