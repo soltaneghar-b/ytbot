@@ -1,0 +1,69 @@
+name: 🔨 Build & Push from Private Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Private repository to build from and push to'
+        required: true
+        type: choice
+        options:
+          - ytbot_rust_dev
+          - ytbot_rust
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔐 Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.inputs.target_repo }}
+
+      - name: 📥 Clone private source repository
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.inputs.target_repo }}
+        run: |
+          git clone --depth=1 "https://x-access-token:${TOKEN}@github.com/${OWNER}/${REPO}.git" .
+          git checkout main
+
+      - name: 🦀 Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: 📦 Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ github.event.inputs.target_repo }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: 🔨 Build release binary
+        run: cargo build --release
+
+      - name: 🚀 Push binary to bot-binary branch
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.inputs.target_repo }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create a fresh orphan branch
+          git checkout --orphan bot-binary
+          git rm -rf --ignore-unmatch .
+          cp target/release/yt-streamer-bot .
+          git add yt-streamer-bot
+          git commit -m "Update bot binary [skip ci]"
+          git push "https://x-access-token:${TOKEN}@github.com/${OWNER}/${REPO}.git" bot-binary --force
