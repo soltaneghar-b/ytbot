@@ -1,0 +1,211 @@
+name: 🔽 General File Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: '🔗 Download URL'
+        required: true
+        type: string
+      filename:
+        description: '💾 File name (optional, auto-detected if empty)'
+        required: false
+        type: string
+        default: ''
+      split_threshold_mb:
+        description: '📦 Split files larger than (MB) — 0 = never'
+        required: false
+        type: number
+        default: 0
+
+jobs:
+  download:
+    name: ⬇️ Download & Push
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      BRANCH_NAME: download-${{ github.run_id }}
+      HARD_LIMIT_MB: 90   # GitHub file size limit is 100 MB — we split at 90 MB
+    steps:
+      # ---------- disk check ----------
+      - name: 💾 Check available disk space
+        run: |
+          AVAIL_KB=$(df /home/runner | awk 'NR==2 {print $4}')
+          AVAIL_MB=$((AVAIL_KB / 1024))
+          echo "📀 Available space: ${AVAIL_MB} MB"
+          if [[ $AVAIL_MB -lt 2048 ]]; then
+            echo "❌ Less than 2 GB free, aborting"
+            exit 1
+          fi
+
+      # ---------- download ----------
+      - name: ⬇️ Download file
+        id: download
+        run: |
+          set -euo pipefail
+          exec 2>&1
+
+          URL="${{ github.event.inputs.url }}"
+          CUSTOM_FILENAME="${{ github.event.inputs.filename }}"
+
+          # Determine output filename
+          if [[ -n "$CUSTOM_FILENAME" ]]; then
+            FILENAME="$CUSTOM_FILENAME"
+          else
+            # Try to extract filename from URL
+            FILENAME=$(basename "$URL" | cut -d'?' -f1)
+            if [[ -z "$FILENAME" || "$FILENAME" == "/" ]]; then
+              FILENAME="download"
+            fi
+          fi
+
+          echo "🔗 URL: $URL"
+          echo "📄 Target filename: $FILENAME"
+
+          TEMP_DIR="./downloads"
+          mkdir -p "$TEMP_DIR"
+          OUTPUT="$TEMP_DIR/$FILENAME"
+
+          # Download with retries
+          HTTP_CODE=""
+          for attempt in 1 2 3; do
+            echo "📥 Attempt $attempt/3"
+            HTTP_CODE=$(curl -sS -w "%{http_code}" -L \
+              --connect-timeout 30 --max-time 1800 \
+              -o "$OUTPUT" "$URL" 2>&1 | tail -1)
+            echo "   HTTP status: $HTTP_CODE"
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              break
+            fi
+            if [[ $attempt -lt 3 ]]; then
+              sleep $((5 * attempt))
+            fi
+          done
+
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "❌ Download failed with HTTP $HTTP_CODE"
+            rm -f "$OUTPUT"
+            exit 1
+          fi
+
+          FILE_SIZE=$(stat -c%s "$OUTPUT")
+          FILE_SIZE_MB=$((FILE_SIZE / 1048576))
+          if [[ $FILE_SIZE -lt 1024 ]]; then
+            echo "❌ File too small (${FILE_SIZE} bytes)"
+            exit 1
+          fi
+          echo "✅ Downloaded ${FILE_SIZE_MB} MB"
+
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          echo "output_file=$OUTPUT" >> $GITHUB_OUTPUT
+
+      # ---------- split if necessary ----------
+      - name: ✂️ Split large files
+        id: split
+        run: |
+          set -euo pipefail
+          INPUT_FILE="${{ steps.download.outputs.output_file }}"
+          FILENAME="${{ steps.download.outputs.filename }}"
+          THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
+          HARD_LIMIT_MB="${{ env.HARD_LIMIT_MB }}"
+
+          STAGING_DIR="./staging"
+          mkdir -p "$STAGING_DIR"
+
+          SIZE=$(stat -c%s "$INPUT_FILE")
+          SIZE_MB=$((SIZE / 1048576))
+
+          # Determine split size
+          SPLIT_SIZE="$THRESHOLD_MB"
+          if [[ "$THRESHOLD_MB" -eq 0 || "$THRESHOLD_MB" -gt "$HARD_LIMIT_MB" ]]; then
+            if [[ $SIZE -gt $((HARD_LIMIT_MB * 1048576)) ]]; then
+              SPLIT_SIZE="$HARD_LIMIT_MB"
+              echo "🛡️ File exceeds hard limit → force-split at ${SPLIT_SIZE} MB"
+            else
+              echo "📁 File size ${SIZE_MB} MB — no split needed"
+              cp "$INPUT_FILE" "$STAGING_DIR/$FILENAME"
+              echo "split=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          if [[ $SPLIT_SIZE -gt 0 && $SIZE -gt $((SPLIT_SIZE * 1048576)) ]]; then
+            echo "✂️ Splitting ${SIZE_MB} MB file into ${SPLIT_SIZE} MB parts..."
+            cd "$STAGING_DIR"
+            cp "$OLDPWD/$INPUT_FILE" "./$FILENAME"
+            zip -r -s "${SPLIT_SIZE}m" "archive.zip" "$FILENAME"
+            rm -f "$FILENAME"
+            cd "$OLDPWD"
+            echo "Split completed"
+            echo "split=true" >> $GITHUB_OUTPUT
+            echo "base_name=archive.zip" >> $GITHUB_OUTPUT
+          else
+            cp "$INPUT_FILE" "$STAGING_DIR/$FILENAME"
+            echo "📁 File under split threshold — single file kept"
+            echo "split=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ---------- push to orphan branch ----------
+      - name: 🚀 Push to orphan branch
+        run: |
+          set -euo pipefail
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          STAGING_DIR="./staging"
+          ORPHAN_DIR=$(mktemp -d)
+
+          cp -a "$STAGING_DIR"/* "$ORPHAN_DIR/"
+          cd "$ORPHAN_DIR"
+
+          git init --initial-branch=main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "$REPO_URL"
+
+          git add .
+          git commit -m "chore: download ${{ steps.download.outputs.filename }} [skip ci]" || {
+            echo "⚠️ Nothing to commit"
+            exit 1
+          }
+
+          PUSH_OK=false
+          for attempt in 1 2 3 4; do
+            if git push origin "HEAD:${BRANCH_NAME}" --force; then
+              PUSH_OK=true
+              break
+            fi
+            sleep $((2 ** (attempt-1)))
+          done
+
+          if ! $PUSH_OK; then
+            echo "❌ Push failed after multiple attempts"
+            exit 1
+          fi
+
+          if ! git ls-remote origin "refs/heads/${BRANCH_NAME}" | grep -q "${BRANCH_NAME}"; then
+            echo "❌ Branch not found after push"
+            exit 1
+          fi
+          echo "✅ Branch '${BRANCH_NAME}' pushed"
+
+      # ---------- summary ----------
+      - name: 📋 Summary
+        run: |
+          REPO="${{ github.repository }}"
+          BRANCH="${{ env.BRANCH_NAME }}"
+          FILENAME="${{ steps.download.outputs.filename }}"
+          SPLIT="${{ steps.split.outputs.split }}"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          if [[ "$SPLIT" == "true" ]]; then
+            echo "📦 Split archive parts:"
+            echo "   https://github.com/${REPO}/tree/${BRANCH}"
+          else
+            echo "📄 Direct download link:"
+            echo "   https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILENAME}"
+          fi
+          echo "📥 Full ZIP download (entire branch):"
+          echo "   https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "ℹ️  This branch will be automatically deleted after 3 hours by the cleanup workflow (if configured)."
