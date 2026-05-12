@@ -526,7 +526,7 @@ jobs:
 
           mapfile -t FILES < <(ls -1)
           TOTAL=${#FILES[@]}
-          BATCH_SIZE=50
+          BATCH_SIZE=25
           FIRST=0
           COMMIT_COUNT=0
           PUSH_OK=false
