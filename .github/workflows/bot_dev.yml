@@ -55,6 +55,9 @@ jobs:
           chmod +x yt-streamer-bot
           echo "✅ Download complete"
 
+      - name: 🧰 Install yt-dlp
+        run: pip install yt-dlp
+
       - name: 🚀 Run bot
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN_DEV }}
