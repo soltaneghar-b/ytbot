@@ -20,11 +20,6 @@ on:
         required: false
         type: string
         default: '720p'
-      split_threshold_mb:
-        description: '📦 Split files larger than (MB) — 0 = never'
-        required: false
-        type: number
-        default: 90
 
 jobs:
   stream:
@@ -492,6 +487,9 @@ jobs:
           "
           cp /tmp/player.html ./player.html
 
+          # ---- Write metadata for the bot ----
+          jq -n --arg url "$DOWNLOAD_URL" '{"download_url":$url}' > metadata.json
+
       - name: 🎨 Generate Audio Player HTML
         if: ${{ github.event.inputs.type == 'audio' }}
         run: |
@@ -506,6 +504,9 @@ jobs:
               -e "s|__AUDIO_TITLE__|${FILENAME}|g" \
               audio-player-template.html > /tmp/audio-player.html
           cp /tmp/audio-player.html ./audio-player.html
+
+          # ---- Write metadata for the bot ----
+          jq -n --arg url "$DOWNLOAD_URL" '{"download_url":$url}' > metadata.json
 
       # ---------- push download branch ----------
       - name: 🚀 Push Download Branch (batched)
@@ -573,6 +574,7 @@ jobs:
           cp /tmp/hls/*.m3u8 "$ORPHAN_DIR/" 2>/dev/null || true
           cp /tmp/subtitles.vtt "$ORPHAN_DIR/" 2>/dev/null || true
           cp /tmp/player.html "$ORPHAN_DIR/"
+          cp metadata.json "$ORPHAN_DIR/"
 
           cd "$ORPHAN_DIR"
           git init --initial-branch=main
@@ -626,6 +628,7 @@ jobs:
 
           cp /tmp/audio/audio.mp3 "$ORPHAN_DIR/"
           cp /tmp/audio-player.html "$ORPHAN_DIR/"
+          cp metadata.json "$ORPHAN_DIR/"
 
           cd "$ORPHAN_DIR"
           git init --initial-branch=main
