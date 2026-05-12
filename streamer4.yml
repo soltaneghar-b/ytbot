@@ -502,8 +502,8 @@ jobs:
 
           # ---- Write metadata for the bot ----
           ZIP_URL="${{ steps.download.outputs.zip_url }}"
-          jq -n --arg download "$DOWNLOAD_URL" --arg zip "$ZIP_URL" \
-             '{"download_url":$download, "zip_url":$zip}' > metadata.json
+          jq -n --arg download "$DOWNLOAD_URL" --arg zip "$ZIP_URL" --arg playlist "$PLAYLIST_URL" \
+             '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist}' > metadata.json
 
       - name: 🎨 Generate Audio Player HTML
         if: ${{ github.event.inputs.type == 'audio' }}
@@ -522,8 +522,8 @@ jobs:
 
           # ---- Write metadata for the bot ----
           ZIP_URL="${{ steps.download.outputs.zip_url }}"
-          jq -n --arg download "$DOWNLOAD_URL" --arg zip "$ZIP_URL" \
-             '{"download_url":$download, "zip_url":$zip}' > metadata.json
+          jq -n --arg download "$DOWNLOAD_URL" --arg zip "$ZIP_URL" --arg playlist "" \
+             '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist}' > metadata.json
 
       # ---------- push all three branches in parallel ----------
       - name: 🚀 Push All Branches (parallel)
