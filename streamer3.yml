@@ -1,0 +1,664 @@
+name: 🎬 YouTube HLS Streamer v3
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: '🎬 YouTube Video URL'
+        required: true
+        type: string
+      type:
+        description: '📦 Output Type'
+        required: true
+        type: choice
+        options:
+          - video
+          - audio
+        default: 'video'
+      quality:
+        description: '🎚️ Quality (video: 144p/360p/480p/720p/1080p | audio: 64kbps/128kbps/192kbps/320kbps)'
+        required: false
+        type: string
+        default: '720p'
+      split_threshold_mb:
+        description: '📦 Split files larger than (MB) — 0 = never'
+        required: false
+        type: number
+        default: 90
+
+jobs:
+  stream:
+    name: 🎬 HLS Stream & ZIP
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      BRANCH_NAME_STREAM: stream-${{ github.run_id }}
+      BRANCH_NAME_DOWNLOAD: download-${{ github.run_id }}
+    steps:
+      # ---------- setup ----------
+      - name: 📂 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main
+          fetch-depth: 1
+
+      - name: 📦 Cache static ffmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-${{ runner.os }}-n8.1-v3
+
+      - name: 🔧 Download & extract ffmpeg
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz"
+          echo "📥 Downloading static ffmpeg from $URL"
+          rm -rf ~/ffmpeg
+          mkdir -p ~/ffmpeg
+          curl -sSL --fail "$URL" -o /tmp/ffmpeg.tar.xz
+          tar xf /tmp/ffmpeg.tar.xz -C ~/ffmpeg
+          rm /tmp/ffmpeg.tar.xz
+          FFMPEG_BIN=$(find ~/ffmpeg -type f -name ffmpeg -executable 2>/dev/null | head -1)
+          if [ -z "$FFMPEG_BIN" ]; then
+            echo "❌ ffmpeg binary not found after extraction"
+            exit 1
+          fi
+          if [ "$(dirname "$FFMPEG_BIN")" != "$HOME/ffmpeg" ]; then
+            mv "$(dirname "$FFMPEG_BIN")"/* "$HOME/ffmpeg/"
+            rmdir "$(dirname "$FFMPEG_BIN")" 2>/dev/null || true
+          fi
+          if [ ! -f ~/ffmpeg/ffmpeg ]; then
+            echo "❌ ffmpeg binary not found after rearrangement"
+            exit 1
+          fi
+          echo "✅ ffmpeg extracted."
+
+      - name: 🛠 Add ffmpeg to PATH
+        run: |
+          if [ -f ~/ffmpeg/ffmpeg ]; then
+            echo "$HOME/ffmpeg" >> $GITHUB_PATH
+            echo "✅ Using static ffmpeg"
+          else
+            echo "⚠️ Static ffmpeg missing – installing via apt"
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          cache: 'pip'
+
+      - name: 📦 Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ---------- convert & gather metadata ----------
+      - name: 🎯 Request Conversion & Gather Metadata (retry up to 3 times)
+        id: converter
+        run: python3 converter.py
+        env:
+          YT_URL: ${{ github.event.inputs.url }}
+          OUTPUT_TYPE: ${{ github.event.inputs.type }}
+          QUALITY: ${{ github.event.inputs.quality }}
+          API_ENDPOINT: ${{ secrets.YT_CONVERT_API }}
+          REFERER_URL: ${{ secrets.YT_CONVERT_REFERER }}
+          USER_AGENT: ${{ secrets.YT_CONVERT_USER_AGENT }}
+
+      # ---------- sanitize filename ----------
+      - name: 🧼 Sanitize filename
+        run: |
+          FILENAME=$(sed -n '2p' /tmp/metadata.txt)
+          SANITIZED=$(python3 sanitize.py "$FILENAME")
+          echo "🧼 Sanitized: $FILENAME → $SANITIZED"
+          sed -i "2s/.*/$SANITIZED/" /tmp/metadata.txt
+
+      # ---------- download & validate original ----------
+      - name: 💾 Disk Space Check
+        run: |
+          AVAIL_KB=$(df /home/runner | awk 'NR==2 {print $4}')
+          AVAIL_MB=$((AVAIL_KB / 1024))
+          echo "📀 Available space: ${AVAIL_MB} MB"
+          if [[ $AVAIL_MB -lt 3072 ]]; then
+            echo "❌ Less than 3 GB free, aborting to avoid disk exhaustion"
+            exit 1
+          fi
+
+      - name: ⬇️ Download Media File (robust, verbose)
+        run: |
+          exec 2>&1
+          set -euo pipefail
+
+          DOWNLOAD_URL=$(sed -n '1p' /tmp/metadata.txt)
+          FILENAME=$(sed -n '2p' /tmp/metadata.txt)
+          OUTPUT_TYPE=$(sed -n '3p' /tmp/metadata.txt)
+          STATUS_URL=$(sed -n '5p' /tmp/metadata.txt)
+
+          USER_AGENT="${USER_AGENT:-Mozilla/5.0}"
+          REFERER_URL="${REFERER_URL:-}"
+
+          TEMP_DIR="./downloads/temp"
+          mkdir -p "$TEMP_DIR"
+          OUTPUT_FILE="$TEMP_DIR/$FILENAME"
+
+          echo "⬇️ Downloading $OUTPUT_TYPE ..."
+          echo "📄 File: $FILENAME"
+          echo "🔗 URL (first 120 chars): ${DOWNLOAD_URL:0:120}..."
+
+          download_attempt() {
+            local url="$1" output="$2"
+            echo "   → Attempting download..." >&2
+            HTTP_CODE=$(curl -sS -w "%{http_code}" -L \
+              --connect-timeout 30 --max-time 1800 \
+              --speed-limit 1024 --speed-time 60 \
+              -H "User-Agent: ${USER_AGENT}" \
+              -H "Referer: ${REFERER_URL}" \
+              -o "$output" "$url" 2>&1 | tail -1)
+            echo "$HTTP_CODE"
+          }
+
+          HTTP_CODE=""
+          for attempt in 1 2 3; do
+            echo "📥 Download attempt $attempt/3"
+            HTTP_CODE=$(download_attempt "$DOWNLOAD_URL" "$OUTPUT_FILE")
+            echo "   HTTP status: $HTTP_CODE"
+
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              break
+            fi
+
+            if [[ -f "$OUTPUT_FILE" ]]; then
+              echo "   Response body (first 500 chars):"
+              head -c 500 "$OUTPUT_FILE" || true
+              echo ""
+            fi
+
+            if [[ $attempt -lt 3 ]]; then
+              echo "   ⚠️ Non‑200, waiting before retry..."
+              sleep $((5 * attempt))
+            fi
+          done
+
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "🔄 Attempting token refresh via status URL..."
+            FRESH_URL=$(curl -sS -L \
+              -H "User-Agent: ${USER_AGENT}" \
+              -H "Accept: application/json" \
+              -H "Referer: ${REFERER_URL}" \
+              "$STATUS_URL" | jq -r '.downloadUrl // empty' 2>/dev/null || true)
+            if [[ -n "$FRESH_URL" && "$FRESH_URL" != "null" ]]; then
+              echo "🔗 Fresh URL obtained, retrying download..."
+              HTTP_CODE=$(download_attempt "$FRESH_URL" "$OUTPUT_FILE")
+              echo "   HTTP status: $HTTP_CODE"
+            else
+              echo "⚠️ Could not obtain fresh download URL"
+            fi
+          fi
+
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "❌ Download failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
+          FILE_SIZE_MB=$((FILE_SIZE / 1048576))
+          if [[ $FILE_SIZE -lt 10240 ]]; then
+            echo "❌ File too small (${FILE_SIZE_MB} MB)"
+            exit 1
+          fi
+          echo "📏 Size: ${FILE_SIZE_MB} MB"
+
+          echo "🔍 Verifying media integrity..."
+          ffprobe -v error -show_entries stream=codec_type,duration \
+            -of default=noprint_wrappers=1 "$OUTPUT_FILE" > /tmp/ffprobe.txt 2>&1 || true
+          if ! grep -q "codec_type" /tmp/ffprobe.txt; then
+            echo "❌ No valid streams"
+            cat /tmp/ffprobe.txt
+            exit 1
+          fi
+          DURATION=$(grep -oP 'duration=\K[0-9.]+' /tmp/ffprobe.txt | head -1)
+          if [[ -n "$DURATION" ]] && (( $(echo "$DURATION < 0.5" | bc -l) )); then
+            echo "❌ Media too short (<0.5s)"
+            exit 1
+          fi
+          echo "✅ Media integrity OK (duration: ${DURATION:-unknown}s)"
+        env:
+          REFERER_URL: ${{ secrets.YT_CONVERT_REFERER }}
+          USER_AGENT: ${{ secrets.YT_CONVERT_USER_AGENT }}
+
+      # ---------- subtitle preprocessing ----------
+      - name: 📝 Subtitle Preprocessing
+        id: subtitles
+        if: ${{ github.event.inputs.type == 'video' }}
+        run: |
+          set -euo pipefail
+          SUBTITLE_LINE=$(sed -n '6p' /tmp/metadata.txt 2>/dev/null || echo "NONE")
+          echo "subtitle_ready=false" >> $GITHUB_OUTPUT
+
+          if [[ "$SUBTITLE_LINE" != "NONE" && -n "$SUBTITLE_LINE" ]]; then
+            echo "📝 Subtitle URL found, attempting download..."
+            if curl -sS -L -o /tmp/subtitle_raw "$SUBTITLE_LINE" 2>/dev/null; then
+              if ffmpeg -y -loglevel error -i /tmp/subtitle_raw -f webvtt /tmp/subtitles.vtt 2>/dev/null; then
+                if [ -s /tmp/subtitles.vtt ] && grep -q 'WEBVTT' /tmp/subtitles.vtt; then
+                  echo "✅ Subtitles ready"
+                  echo "subtitle_ready=true" >> $GITHUB_OUTPUT
+                else
+                  echo "⚠️ Converted VTT empty or invalid – proceeding without subtitles"
+                fi
+              else
+                echo "⚠️ Subtitle conversion failed – proceeding without subtitles"
+              fi
+            else
+              echo "⚠️ Subtitle download failed – proceeding without subtitles"
+            fi
+          else
+            echo "📝 No subtitles available"
+          fi
+
+      # ---------- dynamic segment calculation ----------
+      - name: 🎚️ Calculate Dynamic Segment Duration
+        if: ${{ github.event.inputs.type == 'video' }}
+        id: dynamic_hls
+        run: |
+          set -euo pipefail
+          FILENAME=$(sed -n '2p' /tmp/metadata.txt)
+          INPUT_FILE="./downloads/temp/$FILENAME"
+          FILE_SIZE=$(stat -c%s "$INPUT_FILE")
+
+          HLS_TIME=6
+
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE" 2>/dev/null || true)
+          if [[ -n "$DURATION" && "$DURATION" != "0" ]]; then
+            BITRATE=$(echo "scale=0; ($FILE_SIZE * 8) / $DURATION" | bc 2>/dev/null || true)
+            if [[ -n "$BITRATE" && "$BITRATE" != "0" ]]; then
+              TARGET_SEGMENT=$(echo "scale=2; (3 * 1024 * 1024 * 8) / $BITRATE" | bc 2>/dev/null || true)
+              if [[ -n "$TARGET_SEGMENT" ]]; then
+                if (( $(echo "$TARGET_SEGMENT < 2" | bc -l) )); then HLS_TIME=2;
+                elif (( $(echo "$TARGET_SEGMENT > 10" | bc -l) )); then HLS_TIME=10;
+                else HLS_TIME=$(printf "%.0f" "$TARGET_SEGMENT");
+                fi
+              fi
+            fi
+          fi
+
+          if [[ -z "$HLS_TIME" || "$HLS_TIME" -eq 0 ]]; then
+            HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$INPUT_FILE" 2>/dev/null || true)
+            if [[ -n "$HEIGHT" ]]; then
+              if [[ "$HEIGHT" -ge 1080 ]]; then HLS_TIME=6
+              elif [[ "$HEIGHT" -ge 720 ]]; then HLS_TIME=10
+              elif [[ "$HEIGHT" -ge 480 ]]; then HLS_TIME=10
+              else HLS_TIME=10
+              fi
+            else
+              HLS_TIME=6
+            fi
+          fi
+
+          echo "🔄 Final segment duration: ${HLS_TIME}s"
+          echo "hls_time=${HLS_TIME}" >> $GITHUB_OUTPUT
+
+      # ---------- HLS processing ----------
+      - name: 🎬 Process Video to HLS
+        if: ${{ github.event.inputs.type == 'video' }}
+        id: process_video
+        run: |
+          set -euo pipefail
+          FILENAME=$(sed -n '2p' /tmp/metadata.txt)
+          INPUT_FILE="./downloads/temp/$FILENAME"
+          SEGMENT_DIR="/tmp/hls"
+          mkdir -p "$SEGMENT_DIR"
+          HLS_TIME=${{ steps.dynamic_hls.outputs.hls_time }}
+          SUBTITLE_READY="${{ steps.subtitles.outputs.subtitle_ready }}"
+
+          AUDIO_STREAM=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE" 2>/dev/null || true)
+          if [ -n "$AUDIO_STREAM" ]; then
+            HAS_AUDIO=true
+          else
+            HAS_AUDIO=false
+          fi
+
+          FFMPEG_INPUTS=(-i "$INPUT_FILE")
+          FFMPEG_MAPS=(-map 0:v:0)
+          VAR_STREAM="v:0"
+
+          if $HAS_AUDIO; then
+            FFMPEG_MAPS+=(-map 0:a:0)
+            VAR_STREAM="${VAR_STREAM},a:0"
+          fi
+
+          if [[ "$SUBTITLE_READY" == "true" ]]; then
+            FFMPEG_INPUTS+=(-i /tmp/subtitles.vtt)
+            FFMPEG_MAPS+=(-map 1:s:0)
+            VAR_STREAM="${VAR_STREAM},s:0"
+            SUBTITLE_FLAG=true
+          else
+            SUBTITLE_FLAG=false
+          fi
+
+          echo "📊 Audio present: $HAS_AUDIO   Subtitles: $SUBTITLE_FLAG"
+          echo "   var_stream_map: $VAR_STREAM"
+
+          if $SUBTITLE_FLAG; then
+            ffmpeg -y "${FFMPEG_INPUTS[@]}" \
+              "${FFMPEG_MAPS[@]}" \
+              -c copy \
+              -c:s webvtt \
+              -f hls -hls_time "${HLS_TIME}" -hls_list_size 0 \
+              -hls_segment_type fmp4 \
+              -hls_fmp4_init_filename init.mp4 \
+              -hls_flags independent_segments+temp_file \
+              -hls_segment_filename "$SEGMENT_DIR/segment_%03d.m4s" \
+              -var_stream_map "$VAR_STREAM" \
+              -master_pl_name master.m3u8 \
+              -loglevel error -stats \
+              "$SEGMENT_DIR/playlist.m3u8" || { echo "❌ FFmpeg segmentation failed"; exit 1; }
+          else
+            ffmpeg -y "${FFMPEG_INPUTS[@]}" \
+              "${FFMPEG_MAPS[@]}" \
+              -c copy \
+              -f hls -hls_time "${HLS_TIME}" -hls_list_size 0 \
+              -hls_segment_type fmp4 \
+              -hls_fmp4_init_filename init.mp4 \
+              -hls_flags independent_segments+temp_file \
+              -hls_segment_filename "$SEGMENT_DIR/segment_%03d.m4s" \
+              -loglevel error -stats \
+              "$SEGMENT_DIR/playlist.m3u8" || { echo "❌ FFmpeg segmentation failed"; exit 1; }
+          fi
+
+          echo "has_subtitles=${SUBTITLE_FLAG}" >> $GITHUB_OUTPUT
+
+      - name: 🎵 Process Audio (copy)
+        if: ${{ github.event.inputs.type == 'audio' }}
+        run: |
+          FILENAME=$(sed -n '2p' /tmp/metadata.txt)
+          mkdir -p /tmp/audio
+          cp "./downloads/temp/$FILENAME" /tmp/audio/audio.mp3
+
+      # ---------- rewrite URLs ----------
+      - name: 🔗 Rewrite Playlist URLs (video)
+        if: ${{ github.event.inputs.type == 'video' }}
+        run: |
+          SEGMENT_DIR="/tmp/hls"
+          REPO="${{ github.repository }}"
+          BASE_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}"
+
+          if [ -f "$SEGMENT_DIR/master.m3u8" ]; then
+            sed -i "s|playlist.m3u8|${BASE_URL}/playlist.m3u8|g" "$SEGMENT_DIR/master.m3u8"
+            sed -i "s|subtitle_eng.m3u8|${BASE_URL}/subtitle_eng.m3u8|g" "$SEGMENT_DIR/master.m3u8" 2>/dev/null || true
+          fi
+          for pl in "$SEGMENT_DIR"/*.m3u8; do
+            sed -i "s|URI=\"init.mp4\"|URI=\"${BASE_URL}/init.mp4\"|g" "$pl"
+            sed -i "s|segment_|${BASE_URL}/segment_|g" "$pl"
+          done
+          echo "✅ Playlist rewritten"
+
+      # ---------- player HTML generation ----------
+      - name: 🎨 Generate Video Player HTML
+        if: ${{ github.event.inputs.type == 'video' }}
+        run: |
+          if [ ! -f hls.min.js ]; then
+            echo "📥 Downloading hls.min.js from CDN..."
+            curl -sS -L -o hls.min.js https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js
+          fi
+
+          REPO="${{ github.repository }}"
+          BASE_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}"
+          ZIP_URL="https://github.com/${REPO}/archive/refs/heads/${BRANCH_NAME_DOWNLOAD}.zip"
+
+          PLAYLIST_URL="${BASE_URL}/master.m3u8"
+          if [[ "${{ steps.process_video.outputs.has_subtitles }}" != "true" ]]; then
+              PLAYLIST_URL="${BASE_URL}/playlist.m3u8"
+          fi
+
+          ORIGINAL_FILENAME=$(sed -n '2p' /tmp/metadata.txt)
+
+          sed -e "s|__PLAYLIST_URL__|${PLAYLIST_URL}|g" \
+              -e "s|__ZIP_URL__|${ZIP_URL}|g" \
+              -e "s|__VIDEO_TITLE__|${ORIGINAL_FILENAME}|g" \
+              player-template.html > /tmp/player.html
+
+          python3 -c "
+          content = open('/tmp/player.html').read()
+          lib = open('hls.min.js').read()
+          content = content.replace('__HLS_JS__', lib)
+          with open('/tmp/player.html', 'w') as f:
+              f.write(content)
+          "
+          cp /tmp/player.html ./player.html
+
+      - name: 🎨 Generate Audio Player HTML
+        if: ${{ github.event.inputs.type == 'audio' }}
+        run: |
+          REPO="${{ github.repository }}"
+          BASE_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}"
+          AUDIO_URL="${BASE_URL}/audio.mp3"
+          ZIP_URL="https://github.com/${REPO}/archive/refs/heads/${BRANCH_NAME_DOWNLOAD}.zip"
+          FILENAME=$(sed -n '2p' /tmp/metadata.txt)
+
+          sed -e "s|__AUDIO_URL__|${AUDIO_URL}|g" \
+              -e "s|__ZIP_URL__|${ZIP_URL}|g" \
+              -e "s|__AUDIO_TITLE__|${FILENAME}|g" \
+              audio-player-template.html > /tmp/audio-player.html
+          cp /tmp/audio-player.html ./audio-player.html
+
+      # ---------- split & push download branch ----------
+      - name: 📦 Split Original & Push to Download Branch (batched)
+        run: |
+          set -euo pipefail
+          FILENAME=$(sed -n '2p' /tmp/metadata.txt)
+          INPUT_FILE="./downloads/temp/$FILENAME"
+          OUTPUT_TYPE=$(sed -n '3p' /tmp/metadata.txt)
+          THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
+          HARD_LIMIT_MB=90
+          DOWNLOAD_DIR="./download-zip"
+          mkdir -p "$DOWNLOAD_DIR"
+
+          if [[ ! -f "$INPUT_FILE" ]]; then
+            echo "❌ Original file missing; cannot create download archive"
+            exit 1
+          fi
+
+          echo "📦 Preparing download archive for: $FILENAME"
+
+          if [[ "$THRESHOLD_MB" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            THRESHOLD_MB=$(printf "%.0f" "$THRESHOLD_MB")
+          else
+            echo "❌ Invalid split threshold: $THRESHOLD_MB"
+            exit 1
+          fi
+
+          SIZE=$(stat -c%s "$INPUT_FILE")
+          SIZE_MB=$((SIZE / 1048576))
+
+          SPLIT_SIZE="$THRESHOLD_MB"
+          if [[ $SPLIT_SIZE -eq 0 || $SPLIT_SIZE -gt $HARD_LIMIT_MB ]]; then
+            if [[ $SIZE -gt $((HARD_LIMIT_MB * 1048576)) ]]; then
+              SPLIT_SIZE="$HARD_LIMIT_MB"
+              echo "🛡️ File exceeds hard limit → force-split at ${SPLIT_SIZE} MB"
+            else
+              echo "📁 File size ${SIZE_MB} MB — no split needed"
+              cp "$INPUT_FILE" "$DOWNLOAD_DIR/"
+            fi
+          fi
+
+          if [[ $SPLIT_SIZE -gt 0 && $SIZE -gt $((SPLIT_SIZE * 1048576)) ]]; then
+            echo "✂️ Splitting ${SIZE_MB} MB file into ${SPLIT_SIZE} MB parts..."
+            cd "$DOWNLOAD_DIR"
+            if [[ "$OUTPUT_TYPE" == "audio" ]]; then
+              ZIP_BASE="audio.zip"
+            else
+              ZIP_BASE="video.zip"
+            fi
+            cp "$OLDPWD/$INPUT_FILE" "./$FILENAME"
+            zip -r -s "${SPLIT_SIZE}m" "$ZIP_BASE" "$FILENAME"
+            rm -f "$FILENAME"
+            cd "$OLDPWD"
+            echo "✅ Split completed"
+          elif [[ $SPLIT_SIZE -eq 0 ]]; then
+            cp "$INPUT_FILE" "$DOWNLOAD_DIR/"
+            echo "📁 No split requested — single file copied"
+          elif [[ $SIZE -le $((SPLIT_SIZE * 1048576)) ]]; then
+            cp "$INPUT_FILE" "$DOWNLOAD_DIR/"
+            echo "📁 File under split threshold — single file kept"
+          fi
+
+          echo "📂 Files in download staging:"
+          ls -lh "$DOWNLOAD_DIR"
+
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          ORPHAN_DIR=$(mktemp -d)
+          cp -a "$DOWNLOAD_DIR"/* "$ORPHAN_DIR/"
+
+          cd "$ORPHAN_DIR"
+          git init --initial-branch=main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "$REPO_URL"
+
+          mapfile -t FILES < <(ls -1)
+          TOTAL=${#FILES[@]}
+          BATCH_SIZE=50
+          FIRST=0
+          COMMIT_COUNT=0
+          PUSH_OK=false
+
+          while [ $FIRST -lt $TOTAL ]; do
+            BATCH=("${FILES[@]:$FIRST:$BATCH_SIZE}")
+            git add -- "${BATCH[@]}"
+            git commit -m "chore: dl part $((COMMIT_COUNT+1)) [skip ci]" || { echo "ℹ️ Empty batch"; break; }
+            COMMIT_COUNT=$((COMMIT_COUNT+1))
+            echo "🚀 Pushing download batch $COMMIT_COUNT (${#BATCH[@]} files)"
+
+            for attempt in 1 2 3 4; do
+              if [ $COMMIT_COUNT -eq 1 ]; then
+                git push origin "HEAD:${BRANCH_NAME_DOWNLOAD}" --force && PUSH_OK=true && break
+              else
+                git push origin "HEAD:${BRANCH_NAME_DOWNLOAD}" && PUSH_OK=true && break
+              fi
+              echo "⚠️ Push attempt $attempt failed, retrying in $((2 ** (attempt-1)))s..."
+              sleep $((2 ** (attempt-1)))
+            done
+
+            if ! $PUSH_OK; then
+              echo "❌ All push attempts failed for batch $COMMIT_COUNT"
+              exit 1
+            fi
+            FIRST=$((FIRST + BATCH_SIZE))
+          done
+
+          if ! git ls-remote origin "refs/heads/${BRANCH_NAME_DOWNLOAD}" | grep -q "${BRANCH_NAME_DOWNLOAD}"; then
+            echo "❌ Download branch not found after push"
+            exit 1
+          fi
+          echo "✅ Download branch '${BRANCH_NAME_DOWNLOAD}' pushed"
+
+      # ---------- push stream branch ----------
+      - name: 🚀 Push Stream Branch (video, batched)
+        if: ${{ github.event.inputs.type == 'video' }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+
+          ORPHAN_DIR=$(mktemp -d)
+          cp /tmp/hls/*.m4s "$ORPHAN_DIR/" 2>/dev/null || true
+          cp /tmp/hls/init.mp4 "$ORPHAN_DIR/" 2>/dev/null || true
+          cp /tmp/hls/*.m3u8 "$ORPHAN_DIR/" 2>/dev/null || true
+          cp /tmp/subtitles.vtt "$ORPHAN_DIR/" 2>/dev/null || true
+          cp /tmp/player.html "$ORPHAN_DIR/"
+
+          cd "$ORPHAN_DIR"
+          git init --initial-branch=main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "$REPO_URL"
+
+          mapfile -t FILES < <(ls -1)
+          TOTAL=${#FILES[@]}
+          BATCH_SIZE=50
+          FIRST=0
+          COMMIT_COUNT=0
+          PUSH_OK=false
+
+          while [ $FIRST -lt $TOTAL ]; do
+            BATCH=("${FILES[@]:$FIRST:$BATCH_SIZE}")
+            git add -- "${BATCH[@]}"
+            git commit -m "chore: stream part $((COMMIT_COUNT+1)) [skip ci]" || { echo "ℹ️ Empty batch"; break; }
+            COMMIT_COUNT=$((COMMIT_COUNT+1))
+            echo "🚀 Pushing batch $COMMIT_COUNT (${#BATCH[@]} files)"
+
+            for attempt in 1 2 3 4; do
+              if [ $COMMIT_COUNT -eq 1 ]; then
+                git push origin "HEAD:${BRANCH_NAME_STREAM}" --force && PUSH_OK=true && break
+              else
+                git push origin "HEAD:${BRANCH_NAME_STREAM}" && PUSH_OK=true && break
+              fi
+              echo "⚠️ Push attempt $attempt failed, retrying in $((2 ** (attempt-1)))s..."
+              sleep $((2 ** (attempt-1)))
+            done
+
+            if ! $PUSH_OK; then
+              echo "❌ All push attempts failed for batch $COMMIT_COUNT"
+              exit 1
+            fi
+            FIRST=$((FIRST + BATCH_SIZE))
+          done
+
+          if ! git ls-remote origin "refs/heads/${BRANCH_NAME_STREAM}" | grep -q "${BRANCH_NAME_STREAM}"; then
+            echo "❌ Stream branch not found after push"
+            exit 1
+          fi
+          echo "✅ Stream branch '${BRANCH_NAME_STREAM}' pushed"
+
+      - name: 🚀 Push Stream Branch (audio)
+        if: ${{ github.event.inputs.type == 'audio' }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          ORPHAN_DIR=$(mktemp -d)
+
+          cp /tmp/audio/audio.mp3 "$ORPHAN_DIR/"
+          cp /tmp/audio-player.html "$ORPHAN_DIR/"
+
+          cd "$ORPHAN_DIR"
+          git init --initial-branch=main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "$REPO_URL"
+          git add .
+          git commit -m "chore: audio stream [skip ci]" || true
+
+          PUSH_OK=false
+          for attempt in 1 2 3 4; do
+            if git push origin "HEAD:${BRANCH_NAME_STREAM}" --force; then
+              PUSH_OK=true
+              break
+            fi
+            sleep $((2 ** (attempt-1)))
+          done
+          if ! $PUSH_OK; then
+            echo "❌ Audio push failed"
+            exit 1
+          fi
+          if ! git ls-remote origin "refs/heads/${BRANCH_NAME_STREAM}" | grep -q "${BRANCH_NAME_STREAM}"; then
+            echo "❌ Audio branch not found"
+            exit 1
+          fi
+          echo "✅ Audio stream branch '${BRANCH_NAME_STREAM}' pushed"
+
+      # ---------- summary ----------
+      - name: 📋 Summary
+        run: |
+          REPO="${{ github.repository }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          if [[ "${{ github.event.inputs.type }}" == 'video' ]]; then
+            echo "🎬 Player page: https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}/player.html"
+            echo "📥 Direct HLS playlist: https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}/playlist.m3u8"
+          else
+            echo "🎵 Audio page: https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}/audio-player.html"
+          fi
+          echo "📦 Download ZIP: https://github.com/${REPO}/archive/refs/heads/${BRANCH_NAME_DOWNLOAD}.zip"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "ℹ️ Branches auto-deleted after 3 hours by cleanup workflow."
