@@ -25,12 +25,13 @@ jobs:
   stream:
     name: 🎬 HLS Stream & Download
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       contents: write
     env:
       BRANCH_NAME_STREAM: stream-${{ github.run_id }}
       BRANCH_NAME_DOWNLOAD: download-${{ github.run_id }}
+      BRANCH_NAME_ZIP: zip-${{ github.run_id }}
       CONFIG_BASE: https://raw.githubusercontent.com/${{ github.repository_owner }}/yt-streamer-config/refs/heads/main
     steps:
       # ---------- setup ----------
@@ -130,8 +131,8 @@ jobs:
           AVAIL_KB=$(df /home/runner | awk 'NR==2 {print $4}')
           AVAIL_MB=$((AVAIL_KB / 1024))
           echo "📀 Available space: ${AVAIL_MB} MB"
-          if [[ $AVAIL_MB -lt 3072 ]]; then
-            echo "❌ Less than 3 GB free, aborting to avoid disk exhaustion"
+          if [[ $AVAIL_MB -lt 5120 ]]; then
+            echo "❌ Less than 5 GB free, aborting to avoid disk exhaustion"
             exit 1
           fi
 
@@ -413,16 +414,17 @@ jobs:
           OUTPUT_TYPE=$(sed -n '3p' /tmp/metadata.txt)
           REPO="${{ github.repository }}"
           DOWNLOAD_DIR="./download-staging"
-          mkdir -p "$DOWNLOAD_DIR"
+          ZIP_DIR="./zip-staging"
+          mkdir -p "$DOWNLOAD_DIR" "$ZIP_DIR"
 
           SIZE=$(stat -c%s "$INPUT_FILE")
           SIZE_MB=$((SIZE / 1048576))
+          ZIP_URL=""
 
           if [[ "$SIZE_MB" -le 90 ]]; then
             echo "📁 File ≤ 90 MB – pushing raw file directly"
             cp "$INPUT_FILE" "$DOWNLOAD_DIR/$FILENAME"
             DOWNLOAD_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_DOWNLOAD}/${FILENAME}"
-            echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
           else
             echo "📁 File > 90 MB – segmenting into playable parts"
             INPUT_FILE="$INPUT_FILE" DOWNLOAD_DIR="$DOWNLOAD_DIR" bash segment.sh
@@ -450,8 +452,19 @@ jobs:
                 download.html > "$DOWNLOAD_DIR/download.html"
 
             DOWNLOAD_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_DOWNLOAD}/download.html"
-            echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
+
+            # Also create the old multi-volume ZIP in a separate directory
+            echo "📦 Creating multi-volume ZIP archive..."
+            cp "$INPUT_FILE" "$ZIP_DIR/$FILENAME"
+            cd "$ZIP_DIR"
+            zip -r -s 90m video.zip "$FILENAME"
+            rm -f "$FILENAME"
+            cd "$OLDPWD"
+            ZIP_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_ZIP}/video.zip"
           fi
+
+          echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
+          echo "zip_url=${ZIP_URL}" >> $GITHUB_OUTPUT
 
       # ---------- player HTML generation ----------
       - name: 🎨 Generate Video Player HTML
@@ -488,7 +501,9 @@ jobs:
           cp /tmp/player.html ./player.html
 
           # ---- Write metadata for the bot ----
-          jq -n --arg url "$DOWNLOAD_URL" '{"download_url":$url}' > metadata.json
+          ZIP_URL="${{ steps.download.outputs.zip_url }}"
+          jq -n --arg download "$DOWNLOAD_URL" --arg zip "$ZIP_URL" \
+             '{"download_url":$download, "zip_url":$zip}' > metadata.json
 
       - name: 🎨 Generate Audio Player HTML
         if: ${{ github.event.inputs.type == 'audio' }}
@@ -506,155 +521,109 @@ jobs:
           cp /tmp/audio-player.html ./audio-player.html
 
           # ---- Write metadata for the bot ----
-          jq -n --arg url "$DOWNLOAD_URL" '{"download_url":$url}' > metadata.json
+          ZIP_URL="${{ steps.download.outputs.zip_url }}"
+          jq -n --arg download "$DOWNLOAD_URL" --arg zip "$ZIP_URL" \
+             '{"download_url":$download, "zip_url":$zip}' > metadata.json
 
-      # ---------- push download branch ----------
-      - name: 🚀 Push Download Branch (batched)
+      # ---------- push all three branches in parallel ----------
+      - name: 🚀 Push All Branches (parallel)
         if: ${{ steps.download.outputs.download_url != '' }}
         run: |
           set -euo pipefail
           REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          DOWNLOAD_DIR="./download-staging"
-          ORPHAN_DIR=$(mktemp -d)
-          cp -a "$DOWNLOAD_DIR"/* "$ORPHAN_DIR/"
 
-          cd "$ORPHAN_DIR"
-          git init --initial-branch=main
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add origin "$REPO_URL"
+          # Helper function: batched push to a branch
+          batched_push() {
+            local STAGING_DIR="$1"
+            local BRANCH_NAME="$2"
+            local BATCH_SIZE="$3"
 
-          mapfile -t FILES < <(ls -1)
-          TOTAL=${#FILES[@]}
-          BATCH_SIZE=25
-          FIRST=0
-          COMMIT_COUNT=0
-          PUSH_OK=false
+            if [ -z "$(ls -A "$STAGING_DIR" 2>/dev/null)" ]; then
+              echo "ℹ️  No files to push for branch '${BRANCH_NAME}'"
+              return 0
+            fi
 
-          while [ $FIRST -lt $TOTAL ]; do
-            BATCH=("${FILES[@]:$FIRST:$BATCH_SIZE}")
-            git add -- "${BATCH[@]}"
-            git commit -m "chore: dl part $((COMMIT_COUNT+1)) [skip ci]" || { echo "ℹ️ Empty batch"; break; }
-            COMMIT_COUNT=$((COMMIT_COUNT+1))
-            echo "🚀 Pushing download batch $COMMIT_COUNT (${#BATCH[@]} files)"
+            local ORPHAN_DIR=$(mktemp -d)
+            cp -a "$STAGING_DIR"/* "$ORPHAN_DIR/"
+            cd "$ORPHAN_DIR"
+            git init --initial-branch=main
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git remote add origin "$REPO_URL"
 
-            for attempt in 1 2 3 4; do
-              if [ $COMMIT_COUNT -eq 1 ]; then
-                git push origin "HEAD:${BRANCH_NAME_DOWNLOAD}" --force && PUSH_OK=true && break
-              else
-                git push origin "HEAD:${BRANCH_NAME_DOWNLOAD}" && PUSH_OK=true && break
+            mapfile -t FILES < <(ls -1)
+            local TOTAL=${#FILES[@]}
+            local FIRST=0
+            local COMMIT_COUNT=0
+            local PUSH_OK=false
+
+            while [ $FIRST -lt $TOTAL ]; do
+              BATCH=("${FILES[@]:$FIRST:$BATCH_SIZE}")
+              git add -- "${BATCH[@]}"
+              git commit -m "chore: ${BRANCH_NAME} part $((COMMIT_COUNT+1)) [skip ci]" || { echo "ℹ️ Empty batch"; break; }
+              COMMIT_COUNT=$((COMMIT_COUNT+1))
+              echo "🚀 Pushing ${BRANCH_NAME} batch $COMMIT_COUNT (${#BATCH[@]} files)"
+
+              for attempt in 1 2 3 4; do
+                if [ $COMMIT_COUNT -eq 1 ]; then
+                  git push origin "HEAD:${BRANCH_NAME}" --force && PUSH_OK=true && break
+                else
+                  git push origin "HEAD:${BRANCH_NAME}" && PUSH_OK=true && break
+                fi
+                echo "⚠️ Push attempt $attempt failed, retrying in $((2 ** (attempt-1)))s..."
+                sleep $((2 ** (attempt-1)))
+              done
+
+              if ! $PUSH_OK; then
+                echo "❌ All push attempts failed for ${BRANCH_NAME} batch $COMMIT_COUNT"
+                return 1
               fi
-              echo "⚠️ Push attempt $attempt failed, retrying in $((2 ** (attempt-1)))s..."
-              sleep $((2 ** (attempt-1)))
+              FIRST=$((FIRST + BATCH_SIZE))
             done
 
-            if ! $PUSH_OK; then
-              echo "❌ All push attempts failed for batch $COMMIT_COUNT"
-              exit 1
+            if ! git ls-remote origin "refs/heads/${BRANCH_NAME}" | grep -q "${BRANCH_NAME}"; then
+              echo "❌ Branch ${BRANCH_NAME} not found after push"
+              return 1
             fi
-            FIRST=$((FIRST + BATCH_SIZE))
-          done
+            echo "✅ Branch '${BRANCH_NAME}' pushed"
+          }
 
-          if ! git ls-remote origin "refs/heads/${BRANCH_NAME_DOWNLOAD}" | grep -q "${BRANCH_NAME_DOWNLOAD}"; then
-            echo "❌ Download branch not found after push"
+          # Stream staging (HLS + player + metadata)
+          STREAM_STAGING=$(mktemp -d)
+          if [[ "${{ github.event.inputs.type }}" == 'video' ]]; then
+            cp /tmp/hls/*.m4s "$STREAM_STAGING/" 2>/dev/null || true
+            cp /tmp/hls/init.mp4 "$STREAM_STAGING/" 2>/dev/null || true
+            cp /tmp/hls/*.m3u8 "$STREAM_STAGING/" 2>/dev/null || true
+            cp /tmp/subtitles.vtt "$STREAM_STAGING/" 2>/dev/null || true
+            cp /tmp/player.html "$STREAM_STAGING/"
+          else
+            cp /tmp/audio/audio.mp3 "$STREAM_STAGING/"
+            cp /tmp/audio-player.html "$STREAM_STAGING/"
+          fi
+          cp metadata.json "$STREAM_STAGING/"
+
+          # Launch all three pushes in parallel
+          batched_push "./download-staging" "$BRANCH_NAME_DOWNLOAD" 25 &
+          PID_DL=$!
+
+          batched_push "./zip-staging" "$BRANCH_NAME_ZIP" 25 &
+          PID_ZIP=$!
+
+          batched_push "$STREAM_STAGING" "$BRANCH_NAME_STREAM" 50 &
+          PID_STREAM=$!
+
+          # Wait for all
+          FAILED=0
+          wait $PID_DL || { echo "❌ Download branch push failed"; FAILED=1; }
+          wait $PID_ZIP || { echo "❌ ZIP branch push failed"; FAILED=1; }
+          wait $PID_STREAM || { echo "❌ Stream branch push failed"; FAILED=1; }
+
+          if [ $FAILED -eq 1 ]; then
+            echo "❌ One or more branch pushes failed"
             exit 1
           fi
-          echo "✅ Download branch '${BRANCH_NAME_DOWNLOAD}' pushed"
 
-      # ---------- push stream branch ----------
-      - name: 🚀 Push Stream Branch (video, batched)
-        if: ${{ github.event.inputs.type == 'video' }}
-        run: |
-          set -euo pipefail
-          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-
-          ORPHAN_DIR=$(mktemp -d)
-          cp /tmp/hls/*.m4s "$ORPHAN_DIR/" 2>/dev/null || true
-          cp /tmp/hls/init.mp4 "$ORPHAN_DIR/" 2>/dev/null || true
-          cp /tmp/hls/*.m3u8 "$ORPHAN_DIR/" 2>/dev/null || true
-          cp /tmp/subtitles.vtt "$ORPHAN_DIR/" 2>/dev/null || true
-          cp /tmp/player.html "$ORPHAN_DIR/"
-          cp metadata.json "$ORPHAN_DIR/"
-
-          cd "$ORPHAN_DIR"
-          git init --initial-branch=main
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add origin "$REPO_URL"
-
-          mapfile -t FILES < <(ls -1)
-          TOTAL=${#FILES[@]}
-          BATCH_SIZE=50
-          FIRST=0
-          COMMIT_COUNT=0
-          PUSH_OK=false
-
-          while [ $FIRST -lt $TOTAL ]; do
-            BATCH=("${FILES[@]:$FIRST:$BATCH_SIZE}")
-            git add -- "${BATCH[@]}"
-            git commit -m "chore: stream part $((COMMIT_COUNT+1)) [skip ci]" || { echo "ℹ️ Empty batch"; break; }
-            COMMIT_COUNT=$((COMMIT_COUNT+1))
-            echo "🚀 Pushing batch $COMMIT_COUNT (${#BATCH[@]} files)"
-
-            for attempt in 1 2 3 4; do
-              if [ $COMMIT_COUNT -eq 1 ]; then
-                git push origin "HEAD:${BRANCH_NAME_STREAM}" --force && PUSH_OK=true && break
-              else
-                git push origin "HEAD:${BRANCH_NAME_STREAM}" && PUSH_OK=true && break
-              fi
-              echo "⚠️ Push attempt $attempt failed, retrying in $((2 ** (attempt-1)))s..."
-              sleep $((2 ** (attempt-1)))
-            done
-
-            if ! $PUSH_OK; then
-              echo "❌ All push attempts failed for batch $COMMIT_COUNT"
-              exit 1
-            fi
-            FIRST=$((FIRST + BATCH_SIZE))
-          done
-
-          if ! git ls-remote origin "refs/heads/${BRANCH_NAME_STREAM}" | grep -q "${BRANCH_NAME_STREAM}"; then
-            echo "❌ Stream branch not found after push"
-            exit 1
-          fi
-          echo "✅ Stream branch '${BRANCH_NAME_STREAM}' pushed"
-
-      - name: 🚀 Push Stream Branch (audio)
-        if: ${{ github.event.inputs.type == 'audio' }}
-        run: |
-          set -euo pipefail
-          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          ORPHAN_DIR=$(mktemp -d)
-
-          cp /tmp/audio/audio.mp3 "$ORPHAN_DIR/"
-          cp /tmp/audio-player.html "$ORPHAN_DIR/"
-          cp metadata.json "$ORPHAN_DIR/"
-
-          cd "$ORPHAN_DIR"
-          git init --initial-branch=main
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add origin "$REPO_URL"
-          git add .
-          git commit -m "chore: audio stream [skip ci]" || true
-
-          PUSH_OK=false
-          for attempt in 1 2 3 4; do
-            if git push origin "HEAD:${BRANCH_NAME_STREAM}" --force; then
-              PUSH_OK=true
-              break
-            fi
-            sleep $((2 ** (attempt-1)))
-          done
-          if ! $PUSH_OK; then
-            echo "❌ Audio push failed"
-            exit 1
-          fi
-          if ! git ls-remote origin "refs/heads/${BRANCH_NAME_STREAM}" | grep -q "${BRANCH_NAME_STREAM}"; then
-            echo "❌ Audio branch not found"
-            exit 1
-          fi
-          echo "✅ Audio stream branch '${BRANCH_NAME_STREAM}' pushed"
+          echo "✅ All branches pushed successfully"
 
       # ---------- summary ----------
       - name: 📋 Summary
@@ -668,5 +637,8 @@ jobs:
             echo "🎵 Audio page: https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}/audio-player.html"
           fi
           echo "📦 Download: ${{ steps.download.outputs.download_url }}"
+          if [[ -n "${{ steps.download.outputs.zip_url }}" ]]; then
+            echo "🗜️  ZIP: ${{ steps.download.outputs.zip_url }}"
+          fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "ℹ️ Branches auto-deleted after 3 hours by cleanup workflow."
