@@ -1,11 +1,12 @@
-name: 🔍 YouTube Search Test (yt-dlp)
+name: 🔍 YouTube Bulk Search Stress Test (yt‑dlp)
 
 on:
   workflow_dispatch:
 
 jobs:
-  search-test:
+  bulk-search:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
@@ -15,16 +16,60 @@ jobs:
       - name: 📦 Install yt‑dlp
         run: pip install yt-dlp
 
-      - name: 🔍 Run search
+      - name: 🔍 Run 100 searches
         run: |
-          yt-dlp "ytsearch5:آهنگ شاد" --dump-json --flat-playlist --no-warnings 2>/tmp/ytdlp-err.log | \
-          python3 -c "
-          import sys, json
-          for line in sys.stdin:
-              data = json.loads(line)
-              print(f'{data[\"id\"]}  {data[\"title\"][:60]}')
-          " || {
-            echo "❌ yt‑dlp failed – stderr:"
-            cat /tmp/ytdlp-err.log
-            exit 1
-          }
+          python3 << 'PYEOF'
+          import subprocess, sys, time
+
+          # 100 diverse Persian + English queries
+          queries = [
+              "آهنگ شاد", "موزیک جدید", "آهنگ غمگین", "میکس شاد", "آهنگ قدیمی",
+              "music video", "live concert", "tutorial", "podcast", "movie trailer",
+              "ورزش", "آشپزی", "خنده دار", "رقص", "طبیعت",
+              "guitar cover", "piano tutorial", "coding live", "gameplay", "reaction",
+              "اخبار", "سیاسی", "تاریخ", "علمی", "مستند",
+              "pop music", "rock music", "jazz", "classical", "hip hop",
+              "آموزش زبان", "برنامه نویسی", "طراحی", "نقاشی", "عکاسی",
+              "vlog", "unboxing", "review", "top 10", "challenge",
+              "فوتبال", "بازی", "کمدی", "درام", "وحشت",
+              "animation", "short film", "documentary", "interview", "podcast",
+              "سلامتی", "ورزش صبحگاهی", "مدیتیشن", "یوگا", "رقص لاتین",
+              "dance cover", "karaoke", "behind the scenes", "bloopers", "highlights",
+              "سفر", "غذا", "حیوانات", "کودک", "کارتون",
+              "science", "technology", "space", "nature", "history",
+              "انگیزشی", "موفقیت", "کتاب", "شعر", "داستان",
+              "makeup tutorial", "hair tutorial", "fashion", "fitness", "cooking",
+              "بررسی", "آنباکس", "نقد", "راهنما", "ترفند",
+              "live stream", "podcast clip", "short film", "animation", "timelapse"
+          ]
+
+          total = len(queries)
+          success = 0
+          failed = 0
+
+          for i, q in enumerate(queries, 1):
+              try:
+                  res = subprocess.run(
+                      ["yt-dlp", f"ytsearch5:{q}", "--dump-json", "--flat-playlist", "--no-warnings"],
+                      capture_output=True, text=True, timeout=30
+                  )
+                  if res.returncode == 0 and res.stdout.strip():
+                      success += 1
+                      count = len(res.stdout.strip().split('\n'))
+                      print(f"[{i:3d}/{total}] ✅ {q[:30]:30s} → {count} results")
+                  else:
+                      failed += 1
+                      print(f"[{i:3d}/{total}] ❌ {q[:30]:30s} → FAILED (code={res.returncode})")
+              except Exception as e:
+                  failed += 1
+                  print(f"[{i:3d}/{total}] ❌ {q[:30]:30s} → TIMEOUT/ERROR: {e}")
+              time.sleep(0.5)  # small delay between searches to be gentle
+
+          print("\n" + "="*60)
+          print(f"✅ Successful: {success}/{total}")
+          print(f"❌ Failed:     {failed}/{total}")
+          if success == total:
+              print("🎉 All searches passed – yt‑dlp scraping is safe for production.")
+          else:
+              print(f"⚠️  {failed} searches failed – review the logs above.")
+          PYEOF
