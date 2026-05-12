@@ -460,7 +460,7 @@ jobs:
             zip -r -s 90m video.zip "$FILENAME"
             rm -f "$FILENAME"
             cd "$OLDPWD"
-            ZIP_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_ZIP}/video.zip"
+            ZIP_URL="https://github.com/${REPO}/archive/refs/heads/${BRANCH_NAME_ZIP}.zip"
           fi
 
           echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
