@@ -1,0 +1,30 @@
+name: 🔍 YouTube Search Test (yt-dlp)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  search-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 📦 Install yt‑dlp
+        run: pip install yt-dlp
+
+      - name: 🔍 Run search
+        run: |
+          yt-dlp "ytsearch5:آهنگ شاد" --dump-json --flat-playlist --no-warnings 2>/tmp/ytdlp-err.log | \
+          python3 -c "
+          import sys, json
+          for line in sys.stdin:
+              data = json.loads(line)
+              print(f'{data[\"id\"]}  {data[\"title\"][:60]}')
+          " || {
+            echo "❌ yt‑dlp failed – stderr:"
+            cat /tmp/ytdlp-err.log
+            exit 1
+          }
