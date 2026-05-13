@@ -1,0 +1,21 @@
+name: 🔍 Test yt-dlp playlist search
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 📦 Install yt-dlp
+        run: pip install yt-dlp==<version>   # try 2024.12.06 first, then 2025.xx etc.
+
+      - name: 🔍 Run playlist search
+        run: |
+          yt-dlp "ytsearch5:playlist:music" --flat-playlist --dump-json --no-warnings
+          echo "Exit code: $?"
