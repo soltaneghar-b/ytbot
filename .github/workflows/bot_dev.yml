@@ -55,6 +55,16 @@ jobs:
           chmod +x yt-streamer-bot
           echo "✅ Download complete"
 
+      - name: 🔍 Verify binary version
+        run: |
+          echo "Checking for search log strings..."
+          strings yt-streamer-bot | grep -q "Starting YouTube search for query" \
+            && echo "✅ Regular search logging present" \
+            || echo "⚠️  Missing: regular search logging"
+          strings yt-streamer-bot | grep -q "Starting channel search for" \
+            && echo "✅ Channel search logging present" \
+            || echo "⚠️  Missing: channel search logging"
+
       - name: 🧰 Install yt-dlp
         run: pip install yt-dlp==2026.3.17
 
