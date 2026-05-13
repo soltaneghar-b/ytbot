@@ -30,7 +30,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: "ytbot,ytbot_rust_dev,st1,st2,st3,st4,st5,st6,st7,st8,st9,st10,st11,st12,st13,st14,st15,st16,st17,st18,st19,st20,st21,st22,st23,st24,st25,st26,st27,st28,st29,st30,st31,st32,st33,st34,st35,st36,st37,st38,st39,st40,st41,st42,st43,st44,st45,st46,st47,st48,st49,st50,se1,se2,se3,se4,se5"
+          repositories: "ytbot,ytbot_rust_dev,st1,st2,st3,st4,st5,st6,st7,st8,st9,st10,st11,st12,st13,st14,st15,st16,st17,st18,st19,st20,st21,st22,st23,st24,st25,st26,st27,st28,st29,st30,st31,st32,st33,st34,st35,st36,st37,st38,st39,st40,st41,st42,st43,st44,st45,st46,st47,st48,st49,st50"
 
       - name: 🛑 Prevent overlapping runs
         env:
@@ -55,6 +55,9 @@ jobs:
           chmod +x yt-streamer-bot
           echo "✅ Download complete"
 
+      - name: 🧰 Install yt-dlp
+        run: pip install yt-dlp==2026.3.17
+
       - name: 🚀 Run bot
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN_DEV }}
@@ -63,8 +66,6 @@ jobs:
           BOT_REPO: ${{ github.event.repository.name }}
           STREAMER_REPO_PREFIX: 'st'
           STREAMER_REPO_COUNT: '50'
-          SEARCH_REPO_PREFIX: 'se'
-          SEARCH_REPO_COUNT: '5'
           OFFSET: ${{ github.event.inputs.offset || '' }}
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
