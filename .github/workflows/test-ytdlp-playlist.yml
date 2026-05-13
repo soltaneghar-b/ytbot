@@ -10,13 +10,13 @@ jobs:
     steps:
       - name: Probe common API patterns
         env:
-          BASE: ${{ secrets.HUB_YT_API_URL }}   # e.g. https://hub.ytconvert.org
+          BASE: ${{ secrets.HUB_YT_API_URL }}       # e.g. https://hub.ytconvert.org
           API_KEY: ${{ secrets.HUB_YT_API_KEY }}
           QUERY: "موسیقی"
         run: |
           ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${QUERY}'))")
 
-          # List of paths to try (no secrets printed)
+          # Common path patterns (base URL is appended automatically)
           PATHS=(
             "/api/search"
             "/api/v1/search"
@@ -25,9 +25,10 @@ jobs:
             "/api/playlists"
             "/api/v1/playlists"
             "/api/query"
+            "/api/v1/query"
           )
 
-          # Common parameter patterns
+          # Query‑parameter sets to combine with paths
           PARAMS=(
             "q=${ENCODED}"
             "query=${ENCODED}"
@@ -36,36 +37,58 @@ jobs:
             "query=${ENCODED}&type=playlist"
           )
 
-          echo "Testing GET requests..."
+          echo "=== GET requests ==="
           for path in "${PATHS[@]}"; do
             for param in "${PARAMS[@]}"; do
               url="${BASE}${path}?${param}"
               code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${API_KEY}" "$url" 2>/dev/null)
-              if [ "$code" = "200" ]; then
-                echo "✅ GET ${path}?<params> → 200"
-              elif [ "$code" != "000" ] && [ "$code" != "404" ]; then
-                echo "🔸 GET ${path}?<params> → ${code}"
-              fi
+              case "$code" in
+                200) echo "✅ GET ${path}?<params> → 200" ;;
+                000|404) ;;   # skip 404 and connection errors
+                *)    echo "🔸 GET ${path}?<params> → ${code}" ;;
+              esac
             done
           done
 
           echo ""
-          echo "Testing POST requests (JSON body)..."
+          echo "=== POST requests (JSON body) ==="
           for path in "${PATHS[@]}"; do
             for param in "${PARAMS[@]}"; do
-              # parse param into key=val
               key=$(echo "$param" | cut -d= -f1)
               val=$(echo "$param" | cut -d= -f2)
               json_body="{\"${key}\":\"${val}\"}"
-              code=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "$json_body" "$url" 2>/dev/null)
-              if [ "$code" = "200" ]; then
-                echo "✅ POST ${path} (JSON) → 200"
-              elif [ "$code" != "000" ] && [ "$code" != "404" ]; then
-                echo "🔸 POST ${path} (JSON) → ${code}"
-              fi
+              code=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X POST \
+                -H "Authorization: Bearer ${API_KEY}" \
+                -H "Content-Type: application/json" \
+                -d "$json_body" \
+                "$url" 2>/dev/null)
+              case "$code" in
+                200) echo "✅ POST ${path} (JSON) → 200" ;;
+                000|404) ;;
+                *)    echo "🔸 POST ${path} (JSON) → ${code}" ;;
+              esac
             done
           done
 
           echo ""
-          echo "Discovery complete. Focus on endpoints that returned 200."
-          sleep 30
+          echo "=== POST requests (form data) ==="
+          for path in "${PATHS[@]}"; do
+            for param in "${PARAMS[@]}"; do
+              key=$(echo "$param" | cut -d= -f1)
+              val=$(echo "$param" | cut -d= -f2)
+              code=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X POST \
+                -H "Authorization: Bearer ${API_KEY}" \
+                --data-urlencode "${key}=${val}" \
+                "$url" 2>/dev/null)
+              case "$code" in
+                200) echo "✅ POST ${path} (form) → 200" ;;
+                000|404) ;;
+                *)    echo "🔸 POST ${path} (form) → ${code}" ;;
+              esac
+            done
+          done
+
+          echo ""
+          echo "Discovery finished. Look for any line with ✅ (200)."
