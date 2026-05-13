@@ -1,50 +1,71 @@
-# .github/workflows/test-hub.yml
-name: 🧪 Test hub.ytconvert.org (private)
+# .github/workflows/discover-hub-api.yml
+name: 🔎 Discover hub.ytconvert.org search endpoint
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  discover:
     runs-on: ubuntu-latest
     steps:
-      - name: 🔍 Call private API
+      - name: Probe common API patterns
         env:
-          API_URL: ${{ secrets.HUB_YT_API_URL }}
+          BASE: ${{ secrets.HUB_YT_API_URL }}   # e.g. https://hub.ytconvert.org
           API_KEY: ${{ secrets.HUB_YT_API_KEY }}
           QUERY: "موسیقی"
         run: |
           ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${QUERY}'))")
-          echo "=========================================="
-          echo "Test: hub.ytconvert.org playlist search"
-          echo "Query: ${QUERY} (encoded: ${ENCODED})"
-          echo "API URL: [hidden]"
-          echo "API Key present: $([ -n "${API_KEY}" ] && echo 'YES' || echo 'NO')"
-          echo "=========================================="
 
-          if [ -n "${API_KEY}" ]; then
-            RESPONSE=$(curl -s -H "Authorization: Bearer ${API_KEY}" "${API_URL}?q=${ENCODED}&type=playlist")
-            CURL_EXIT=$?
-          else
-            RESPONSE=$(curl -s "${API_URL}?q=${ENCODED}&type=playlist")
-            CURL_EXIT=$?
-          fi
+          # List of paths to try (no secrets printed)
+          PATHS=(
+            "/api/search"
+            "/api/v1/search"
+            "/api/v2/search"
+            "/search"
+            "/api/playlists"
+            "/api/v1/playlists"
+            "/api/query"
+          )
+
+          # Common parameter patterns
+          PARAMS=(
+            "q=${ENCODED}"
+            "query=${ENCODED}"
+            "search=${ENCODED}"
+            "q=${ENCODED}&type=playlist"
+            "query=${ENCODED}&type=playlist"
+          )
+
+          echo "Testing GET requests..."
+          for path in "${PATHS[@]}"; do
+            for param in "${PARAMS[@]}"; do
+              url="${BASE}${path}?${param}"
+              code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${API_KEY}" "$url" 2>/dev/null)
+              if [ "$code" = "200" ]; then
+                echo "✅ GET ${path}?<params> → 200"
+              elif [ "$code" != "000" ] && [ "$code" != "404" ]; then
+                echo "🔸 GET ${path}?<params> → ${code}"
+              fi
+            done
+          done
 
           echo ""
-          echo "--- curl exit code: ${CURL_EXIT} ---"
-          echo ""
-          echo "Response (full):"
-          echo "${RESPONSE}"
-          echo ""
-          echo "--- end of response ---"
-          echo ""
+          echo "Testing POST requests (JSON body)..."
+          for path in "${PATHS[@]}"; do
+            for param in "${PARAMS[@]}"; do
+              # parse param into key=val
+              key=$(echo "$param" | cut -d= -f1)
+              val=$(echo "$param" | cut -d= -f2)
+              json_body="{\"${key}\":\"${val}\"}"
+              code=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "$json_body" "$url" 2>/dev/null)
+              if [ "$code" = "200" ]; then
+                echo "✅ POST ${path} (JSON) → 200"
+              elif [ "$code" != "000" ] && [ "$code" != "404" ]; then
+                echo "🔸 POST ${path} (JSON) → ${code}"
+              fi
+            done
+          done
 
-          if echo "${RESPONSE}" | grep -q '"playlist_id"'; then
-            echo "✅ SUCCESS: playlists found"
-          else
-            echo "❌ No playlist_id detected"
-          fi
-
           echo ""
-          echo "Sleeping 30 seconds so you can read the logs…"
+          echo "Discovery complete. Focus on endpoints that returned 200."
           sleep 30
