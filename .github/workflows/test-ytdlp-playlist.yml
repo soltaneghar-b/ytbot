@@ -1,21 +1,51 @@
-name: 🔍 Test yt-dlp playlist search
+name: 🔍 Find stable yt‑dlp for playlists
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  find-version:
     runs-on: ubuntu-latest
+    outputs:
+      working-version: ${{ steps.test.outputs.version }}
     steps:
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: 📦 Install yt-dlp
-        run: pip install yt-dlp==<version>   # try 2024.12.06 first, then 2025.xx etc.
-
-      - name: 🔍 Run playlist search
+      - name: 🔁 Test yt‑dlp versions
+        id: test
+        env:
+          # add/remove versions as needed; will be tested in order
+          VERSIONS: |
+            2024.12.06
+            2025.03.22
+            2025.06.15
+            2025.09.01
+            2025.11.07
+            2026.01.15
+            2026.03.17
+          QUERY: "music"
         run: |
-          yt-dlp "ytsearch5:playlist:music" --flat-playlist --dump-json --no-warnings
-          echo "Exit code: $?"
+          set -e
+          for ver in $VERSIONS; do
+            echo "----------------------------------------"
+            echo "Testing yt‑dlp==$ver ..."
+            pip install -q yt-dlp==$ver
+            # run a playlist search with a short query
+            if yt-dlp "ytsearch5:playlist:${QUERY}" --flat-playlist --dump-json --no-warnings --skip-download > out.json 2>err.log; then
+              if grep -q '"playlist_id"' out.json; then
+                echo "✅ SUCCESS: yt-dlp==$ver works for playlists"
+                echo "version=$ver" >> $GITHUB_OUTPUT
+                exit 0
+              else
+                echo "⚠️  No playlist results returned by $ver"
+              fi
+            else
+              echo "❌ yt‑dlp==$ver failed (exit code $?). Error log:"
+              cat err.log
+            fi
+          done
+          echo "No working version found."
+          exit 1
