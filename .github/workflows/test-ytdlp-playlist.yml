@@ -1,94 +1,75 @@
-# .github/workflows/discover-hub-api.yml
-name: 🔎 Discover hub.ytconvert.org search endpoint
+# .github/workflows/test-warp-playlist.yml
+name: 🧪 Test WARP proxy for playlist search
 
 on:
   workflow_dispatch:
 
 jobs:
-  discover:
+  test-warp:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Probe common API patterns
+      - name: Start WARP container
+        run: |
+          docker network create warp-net || true
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+
+          echo "Waiting for WARP..."
+          sleep 15
+          for i in {1..5}; do
+            RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "✅ WARP active"
+              echo "$RESULT"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "⚠️ WARP may not be fully active, continuing anyway"
+
+      - name: Install yt-dlp
+        run: pip install yt-dlp==2026.3.17
+
+      - name: Test playlist search through WARP
         env:
-          BASE: ${{ secrets.HUB_YT_API_URL }}       # e.g. https://hub.ytconvert.org
-          API_KEY: ${{ secrets.HUB_YT_API_KEY }}
           QUERY: "موسیقی"
         run: |
-          ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${QUERY}'))")
+          echo "=========================================="
+          echo "Testing playlist search via WARP proxy"
+          echo "Query: ${QUERY}"
+          echo "=========================================="
+          yt-dlp \
+            --proxy "socks5://127.0.0.1:1080" \
+            "ytsearch10:playlist:${QUERY}" \
+            --flat-playlist \
+            --dump-json \
+            --no-warnings \
+            --skip-download \
+            > out.json 2>err.log
 
-          # Common path patterns (base URL is appended automatically)
-          PATHS=(
-            "/api/search"
-            "/api/v1/search"
-            "/api/v2/search"
-            "/search"
-            "/api/playlists"
-            "/api/v1/playlists"
-            "/api/query"
-            "/api/v1/query"
-          )
-
-          # Query‑parameter sets to combine with paths
-          PARAMS=(
-            "q=${ENCODED}"
-            "query=${ENCODED}"
-            "search=${ENCODED}"
-            "q=${ENCODED}&type=playlist"
-            "query=${ENCODED}&type=playlist"
-          )
-
-          echo "=== GET requests ==="
-          for path in "${PATHS[@]}"; do
-            for param in "${PARAMS[@]}"; do
-              url="${BASE}${path}?${param}"
-              code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${API_KEY}" "$url" 2>/dev/null)
-              case "$code" in
-                200) echo "✅ GET ${path}?<params> → 200" ;;
-                000|404) ;;   # skip 404 and connection errors
-                *)    echo "🔸 GET ${path}?<params> → ${code}" ;;
-              esac
-            done
-          done
-
+          echo "Exit code: $?"
           echo ""
-          echo "=== POST requests (JSON body) ==="
-          for path in "${PATHS[@]}"; do
-            for param in "${PARAMS[@]}"; do
-              key=$(echo "$param" | cut -d= -f1)
-              val=$(echo "$param" | cut -d= -f2)
-              json_body="{\"${key}\":\"${val}\"}"
-              code=$(curl -s -o /dev/null -w "%{http_code}" \
-                -X POST \
-                -H "Authorization: Bearer ${API_KEY}" \
-                -H "Content-Type: application/json" \
-                -d "$json_body" \
-                "$url" 2>/dev/null)
-              case "$code" in
-                200) echo "✅ POST ${path} (JSON) → 200" ;;
-                000|404) ;;
-                *)    echo "🔸 POST ${path} (JSON) → ${code}" ;;
-              esac
-            done
-          done
-
+          echo "--- stderr ---"
+          cat err.log
           echo ""
-          echo "=== POST requests (form data) ==="
-          for path in "${PATHS[@]}"; do
-            for param in "${PARAMS[@]}"; do
-              key=$(echo "$param" | cut -d= -f1)
-              val=$(echo "$param" | cut -d= -f2)
-              code=$(curl -s -o /dev/null -w "%{http_code}" \
-                -X POST \
-                -H "Authorization: Bearer ${API_KEY}" \
-                --data-urlencode "${key}=${val}" \
-                "$url" 2>/dev/null)
-              case "$code" in
-                200) echo "✅ POST ${path} (form) → 200" ;;
-                000|404) ;;
-                *)    echo "🔸 POST ${path} (form) → ${code}" ;;
-              esac
-            done
-          done
-
+          echo "--- stdout (first 20 lines) ---"
+          head -20 out.json
           echo ""
-          echo "Discovery finished. Look for any line with ✅ (200)."
+
+          if grep -q '"playlist_id"' out.json; then
+            echo "✅ SUCCESS: Playlist results found through WARP!"
+          else
+            echo "❌ No playlist_id detected"
+          fi
+          echo ""
+          echo "Sleeping 30 seconds so you can read the logs…"
+          sleep 30
