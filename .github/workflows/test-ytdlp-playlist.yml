@@ -14,26 +14,37 @@ jobs:
           API_KEY: ${{ secrets.HUB_YT_API_KEY }}
           QUERY: "موسیقی"
         run: |
-          # URL-encode the Persian query
           ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${QUERY}'))")
-          echo "Searching for: ${QUERY}"
-          echo "(API endpoint and key are hidden)"
+          echo "=========================================="
+          echo "Test: hub.ytconvert.org playlist search"
+          echo "Query: ${QUERY} (encoded: ${ENCODED})"
+          echo "API URL: [hidden]"
+          echo "API Key present: $([ -n "${API_KEY}" ] && echo 'YES' || echo 'NO')"
+          echo "=========================================="
 
-          # Build request (add &type=playlist or similar if supported)
-          # Example: use GET with query param, and Authorization header if key provided
           if [ -n "${API_KEY}" ]; then
             RESPONSE=$(curl -s -H "Authorization: Bearer ${API_KEY}" "${API_URL}?q=${ENCODED}&type=playlist")
+            CURL_EXIT=$?
           else
             RESPONSE=$(curl -s "${API_URL}?q=${ENCODED}&type=playlist")
+            CURL_EXIT=$?
           fi
 
-          echo "Response preview (first 100 chars):"
-          echo "${RESPONSE}" | head -c 100
+          echo ""
+          echo "--- curl exit code: ${CURL_EXIT} ---"
+          echo ""
+          echo "Response (full):"
+          echo "${RESPONSE}"
+          echo ""
+          echo "--- end of response ---"
           echo ""
 
-          # Check for playlist IDs
           if echo "${RESPONSE}" | grep -q '"playlist_id"'; then
-            echo "✅ Playlist results found!"
+            echo "✅ SUCCESS: playlists found"
           else
-            echo "❌ No playlist_id in response."
+            echo "❌ No playlist_id detected"
           fi
+
+          echo ""
+          echo "Sleeping 30 seconds so you can read the logs…"
+          sleep 30
