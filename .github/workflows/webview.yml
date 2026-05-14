@@ -19,7 +19,7 @@ jobs:
       - name: Download WebView2 Evergreen Bootstrapper
         run: |
           # Official Microsoft redirect link for the latest bootstrapper
-          DOWNLOAD_URL="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+          DOWNLOAD_URL="https://go.microsoft.com/fwlink/p/?LinkId=2124784"
           OUTPUT_FILE="installers/MicrosoftEdgeWebview2Bootstrapper.exe"
           mkdir -p installers
           curl -L -o "$OUTPUT_FILE" "$DOWNLOAD_URL"
