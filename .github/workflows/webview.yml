@@ -1,7 +1,7 @@
 name: Update WebView2 Runtime Installer
 
 on:
-  workflow_dispatch:   # Manual trigger only – no automatic runs
+  workflow_dispatch:   # manual trigger only
 
 jobs:
   download-and-push:
@@ -23,7 +23,7 @@ jobs:
       - name: Check for changes
         id: check
         run: |
-          if git diff --quiet; then
+          if [ -z "$(git status --porcelain)" ]; then
             echo "changed=false" >> $GITHUB_OUTPUT
           else
             echo "changed=true" >> $GITHUB_OUTPUT
