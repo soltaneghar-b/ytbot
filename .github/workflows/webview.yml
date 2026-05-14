@@ -1,7 +1,7 @@
 name: Update WebView2 Runtime Installer
 
 on:
-  workflow_dispatch:  # Only manual trigger
+  workflow_dispatch:   # Manual trigger only – no automatic runs
 
 jobs:
   download-and-push:
