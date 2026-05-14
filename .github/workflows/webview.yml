@@ -15,10 +15,26 @@ jobs:
 
       - name: Download WebView2 Evergreen Bootstrapper
         run: |
-          DOWNLOAD_URL="https://go.microsoft.com/fwlink/p/?LinkId=2124784"
+          # Official Microsoft redirect link (without /p/ and with lowercase linkid)
+          DOWNLOAD_URL="https://go.microsoft.com/fwlink/?linkid=2124784"
           OUTPUT_FILE="installers/MicrosoftEdgeWebview2Bootstrapper.exe"
           mkdir -p installers
-          curl -L -o "$OUTPUT_FILE" "$DOWNLOAD_URL"
+          curl -L \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" \
+            -o "$OUTPUT_FILE" \
+            "$DOWNLOAD_URL"
+
+      - name: Verify downloaded file is a Windows executable
+        run: |
+          FILE="installers/MicrosoftEdgeWebview2Bootstrapper.exe"
+          # Check that the file starts with "MZ" (DOS header)
+          if ! head -c 2 "$FILE" | grep -q "MZ"; then
+            echo "::error::Downloaded file is not a valid Windows executable (no MZ header)."
+            echo "First 200 bytes:"
+            head -c 200 "$FILE"
+            exit 1
+          fi
+          echo "✅ Valid executable (MZ header found)"
 
       - name: Check for changes
         id: check
