@@ -386,7 +386,6 @@ jobs:
           mkdir -p /tmp/audio
           cp "./downloads/temp/$FILENAME" /tmp/audio/audio.mp3
 
-      # ---------- ✂️ Split original video into 20 MB playable segments ----------
       - name: ✂️ Split video into 20 MB playable segments (for Bale delivery)
         if: ${{ github.event.inputs.type == 'video' }}
         id: video_segments
@@ -397,17 +396,11 @@ jobs:
           SEGMENT_DIR="./segment-staging"
           mkdir -p "$SEGMENT_DIR"
 
-          # Calculate a safe segment duration (seconds) so each segment stays ≤ 19 MB
           SIZE_BYTES=$(stat -c%s "$INPUT_FILE")
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE")
           BITRATE_BPS=$(echo "scale=0; ($SIZE_BYTES * 8) / $DURATION" | bc)
-          # Allow 19 MB per segment = 159383552 bits
           SEG_TIME_SEC=$(echo "scale=2; 159383552 / $BITRATE_BPS" | bc)
-          # Cap at 600 s (10 min) to avoid excessively long segments
-          if (( $(echo "$SEG_TIME_SEC > 600" | bc -l) )); then
-            SEG_TIME_SEC=600
-          fi
-          # Floor to an integer, minimum 2 s
+          if (( $(echo "$SEG_TIME_SEC > 600" | bc -l) )); then SEG_TIME_SEC=600; fi
           SEG_TIME_INT=$(printf "%.0f" "$SEG_TIME_SEC")
           if [ "$SEG_TIME_INT" -lt 2 ]; then SEG_TIME_INT=2; fi
 
@@ -415,17 +408,10 @@ jobs:
           ffmpeg -y -i "$INPUT_FILE" -c copy -f segment -segment_time "$SEG_TIME_INT" -reset_timestamps 1 "$SEGMENT_DIR/seg_%03d.mp4"
           echo "✅ Segments created: $(ls -1 "$SEGMENT_DIR")"
 
-          # Build JSON array of segment URLs
+          # Build JSON array of segment URLs safely
           REPO="${{ github.repository }}"
           BASE_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}"
-          SEGMENTS_JSON="[]"
-          for f in "$SEGMENT_DIR"/seg_*.mp4; do
-            if [ -f "$f" ]; then
-              BASENAME=$(basename "$f")
-              URL="${BASE_URL}/${BASENAME}"
-              SEGMENTS_JSON=$(echo "$SEGMENTS_JSON" | jq --arg url "$URL" '. + [$url]')
-            fi
-          done
+          SEGMENTS_JSON=$(find "$SEGMENT_DIR" -name 'seg_*.mp4' | sort | jq -R -s -c --arg base "$BASE_URL" 'split("\n") | map(select(length > 0) | "\($base)/\(.)")')
           echo "segments_json=${SEGMENTS_JSON}" >> $GITHUB_OUTPUT
 
       # ---------- rewrite URLs ----------
