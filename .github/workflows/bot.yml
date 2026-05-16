@@ -78,6 +78,13 @@ jobs:
       - name: 🧰 Install yt-dlp
         run: pip install yt-dlp==2026.3.17
 
+      - name: ☁️ Install cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
+          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+          echo "☁️ cloudflared installed"
+
       - name: 🚀 Run bot
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
