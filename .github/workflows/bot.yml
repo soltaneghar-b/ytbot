@@ -78,12 +78,14 @@ jobs:
       - name: 🧰 Install yt-dlp
         run: pip install yt-dlp==2026.3.17
 
-      - name: ☁️ Install cloudflared
+      - name: 🌐 Setup ngrok
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared-linux-amd64
-          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-          echo "☁️ cloudflared installed"
+          wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+          tar xzf ngrok-v3-stable-linux-amd64.tgz
+          sudo mv ngrok /usr/local/bin/ngrok
+          ngrok config add-authtoken $NGROK_AUTHTOKEN
 
       - name: 🚀 Run bot
         env:
