@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: '720p'
+      chat_id:
+        description: 'Chat ID for delivery verification'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   stream:
@@ -562,18 +567,20 @@ jobs:
           ZIP_URL="${{ steps.download.outputs.zip_url }}"
           if [ -f /tmp/segments.json ]; then
             jq -n \
+              --arg chat_id "${{ github.event.inputs.chat_id }}" \
               --arg download "$DOWNLOAD_URL" \
               --arg zip "$ZIP_URL" \
               --arg playlist "$PLAYLIST_URL" \
               --slurpfile segments /tmp/segments.json \
-              '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":$segments[0]}' \
+              '{"chat_id":$chat_id, "download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":$segments[0]}' \
               > metadata.json
           else
             jq -n \
+              --arg chat_id "${{ github.event.inputs.chat_id }}" \
               --arg download "$DOWNLOAD_URL" \
               --arg zip "$ZIP_URL" \
               --arg playlist "$PLAYLIST_URL" \
-              '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":[]}' \
+              '{"chat_id":$chat_id, "download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":[]}' \
               > metadata.json
           fi
 
@@ -594,8 +601,12 @@ jobs:
 
           # ---- Write metadata for the bot ----
           ZIP_URL="${{ steps.download.outputs.zip_url }}"
-          jq -n --arg download "$DOWNLOAD_URL" --arg zip "$ZIP_URL" --arg playlist "" \
-             '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist}' > metadata.json
+          jq -n \
+            --arg chat_id "${{ github.event.inputs.chat_id }}" \
+            --arg download "$DOWNLOAD_URL" \
+            --arg zip "$ZIP_URL" \
+            --arg playlist "" \
+            '{"chat_id":$chat_id, "download_url":$download, "zip_url":$zip, "playlist_url":$playlist}' > metadata.json
 
       # ---------- push all three branches in parallel ----------
       - name: 🚀 Push All Branches (parallel)
