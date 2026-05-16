@@ -409,7 +409,7 @@ jobs:
           if [ -n "$DURATION" ] && [ "$DURATION" != "0" ]; then
             BITRATE_BPS=$(echo "scale=0; ($SIZE_BYTES * 8) / $DURATION" | bc 2>/dev/null || echo "0")
             if [ -n "$BITRATE_BPS" ] && [ "$BITRATE_BPS" != "0" ]; then
-              SEG_TIME_SEC=$(echo "scale=2; $TARGET_BYTES / $BITRATE_BPS" | bc 2>/dev/null || echo "0")
+              SEG_TIME_SEC=$(echo "scale=2; $TARGET_BYTES * 8 / $BITRATE_BPS" | bc 2>/dev/null || echo "0")
               if (( $(echo "$SEG_TIME_SEC > 600" | bc -l) )); then SEG_TIME_SEC=600; fi
               SEG_TIME_INT=$(printf "%.0f" "$SEG_TIME_SEC" 2>/dev/null || echo "0")
               if [ "$SEG_TIME_INT" -lt 2 ]; then SEG_TIME_INT=2; fi
