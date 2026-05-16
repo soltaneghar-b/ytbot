@@ -531,12 +531,20 @@ jobs:
           # ---- Write metadata for the bot ----
           ZIP_URL="${{ steps.download.outputs.zip_url }}"
           SEGMENTS_JSON="${{ steps.video_segments.outputs.segments_json }}"
-          jq -n \
-            --arg download "$DOWNLOAD_URL" \
-            --arg zip "$ZIP_URL" \
-            --arg playlist "$PLAYLIST_URL" \
-            --argjson segments "$SEGMENTS_JSON" \
-            '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":$segments}' > metadata.json
+          if [ -z "$SEGMENTS_JSON" ] || [ "$SEGMENTS_JSON" = "[]" ]; then
+            jq -n \
+              --arg download "$DOWNLOAD_URL" \
+              --arg zip "$ZIP_URL" \
+              --arg playlist "$PLAYLIST_URL" \
+              '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":[]}' > metadata.json
+          else
+            jq -n \
+              --arg download "$DOWNLOAD_URL" \
+              --arg zip "$ZIP_URL" \
+              --arg playlist "$PLAYLIST_URL" \
+              --argjson segments "$SEGMENTS_JSON" \
+              '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":$segments}' > metadata.json
+          fi
 
       - name: 🎨 Generate Audio Player HTML
         if: ${{ github.event.inputs.type == 'audio' }}
