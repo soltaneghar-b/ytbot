@@ -399,7 +399,7 @@ jobs:
           SIZE_BYTES=$(stat -c%s "$INPUT_FILE")
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE")
           BITRATE_BPS=$(echo "scale=0; ($SIZE_BYTES * 8) / $DURATION" | bc)
-          SEG_TIME_SEC=$(echo "scale=2; 159383552 / $BITRATE_BPS" | bc)
+          SEG_TIME_SEC=$(echo "scale=2; 18874368 / $BITRATE_BPS" | bc)
           if (( $(echo "$SEG_TIME_SEC > 600" | bc -l) )); then SEG_TIME_SEC=600; fi
           SEG_TIME_INT=$(printf "%.0f" "$SEG_TIME_SEC")
           if [ "$SEG_TIME_INT" -lt 2 ]; then SEG_TIME_INT=2; fi
