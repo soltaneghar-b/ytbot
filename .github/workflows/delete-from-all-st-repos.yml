@@ -1,0 +1,80 @@
+name: 🗑️ Delete a file from all st repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_file:
+        description: 'Path of the file to delete (e.g., .github/workflows/st.yml)'
+        required: true
+        type: string
+
+jobs:
+  delete-from-st-repos:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      REPO_LIST: "st1,st2,st3,st4,st5,st6,st7,st8,st9,st10,st11,st12,st13,st14,st15,st16,st17,st18,st19,st20,st21,st22,st23,st24,st25,st26,st27,st28,st29,st30,st31,st32,st33,st34,st35,st36,st37,st38,st39,st40,st41,st42,st43,st44,st45,st46,st47,st48,st49,st50"
+    steps:
+      - name: 🔐 Generate GitHub App token for st repos
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ env.REPO_LIST }}
+
+      - name: 🗑️ Delete file from all repos
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          TARGET_FILE: ${{ github.event.inputs.target_file }}
+          REPO_LIST: ${{ env.REPO_LIST }}
+        run: |
+          python3 << 'PYEOF'
+          import os, sys, requests
+
+          owner = os.environ['OWNER']
+          token = os.environ['GH_TOKEN']
+          target_file = os.environ['TARGET_FILE']
+          repos = [r.strip() for r in os.environ['REPO_LIST'].split(',') if r.strip()]
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "ytbot-delete"
+          }
+
+          for repo in repos:
+              api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{target_file}"
+              print(f"🔍 {repo}: checking {target_file}...")
+              try:
+                  r = requests.get(api_url, headers=headers, timeout=10)
+                  if r.status_code == 200:
+                      sha = r.json().get('sha')
+                      if not sha:
+                          print(f"   ⚠️ {repo}: SHA not found, skipping")
+                          continue
+                      # Delete the file
+                      delete_payload = {
+                          "message": f"Delete {target_file}",
+                          "sha": sha,
+                          "branch": "main"
+                      }
+                      dr = requests.delete(api_url, headers=headers, json=delete_payload, timeout=15)
+                      if dr.status_code == 200:
+                          print(f"   ✅ {repo}: deleted")
+                      else:
+                          print(f"   ❌ {repo}: deletion failed HTTP {dr.status_code} - {dr.json().get('message', 'unknown')}")
+                  elif r.status_code == 404:
+                      print(f"   ℹ️ {repo}: file not found, nothing to delete")
+                  else:
+                      print(f"   ❌ {repo}: check failed HTTP {r.status_code} - {r.json().get('message', 'unknown')}")
+              except Exception as e:
+                  print(f"   ❌ {repo}: error - {e}")
+              # Small delay to avoid secondary rate limits
+              time.sleep(0.3)
+
+          print("🎉 Deletion complete.")
+          PYEOF
