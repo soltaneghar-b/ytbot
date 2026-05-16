@@ -33,7 +33,7 @@ jobs:
           REPO_LIST: ${{ env.REPO_LIST }}
         run: |
           python3 << 'PYEOF'
-          import os, sys, requests
+          import os, sys, time, requests
 
           owner = os.environ['OWNER']
           token = os.environ['GH_TOKEN']
@@ -56,7 +56,6 @@ jobs:
                       if not sha:
                           print(f"   ⚠️ {repo}: SHA not found, skipping")
                           continue
-                      # Delete the file
                       delete_payload = {
                           "message": f"Delete {target_file}",
                           "sha": sha,
@@ -73,7 +72,6 @@ jobs:
                       print(f"   ❌ {repo}: check failed HTTP {r.status_code} - {r.json().get('message', 'unknown')}")
               except Exception as e:
                   print(f"   ❌ {repo}: error - {e}")
-              # Small delay to avoid secondary rate limits
               time.sleep(0.3)
 
           print("🎉 Deletion complete.")
