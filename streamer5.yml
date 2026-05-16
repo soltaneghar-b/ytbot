@@ -386,7 +386,7 @@ jobs:
           mkdir -p /tmp/audio
           cp "./downloads/temp/$FILENAME" /tmp/audio/audio.mp3
 
-      - name: ✂️ Split video into 20 MB playable segments (for Bale delivery)
+      - name: ✂️ Split video into ≤18 MB playable segments (for Bale delivery)
         if: ${{ github.event.inputs.type == 'video' }}
         id: video_segments
         run: |
@@ -396,16 +396,46 @@ jobs:
           SEGMENT_DIR="./segment-staging"
           mkdir -p "$SEGMENT_DIR"
 
+          TARGET_BYTES=18874368   # 18 MB (leave headroom for Bale's 20 MB limit)
           SIZE_BYTES=$(stat -c%s "$INPUT_FILE")
-          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE")
-          BITRATE_BPS=$(echo "scale=0; ($SIZE_BYTES * 8) / $DURATION" | bc)
-          SEG_TIME_SEC=$(echo "scale=2; 18874368 / $BITRATE_BPS" | bc)
-          if (( $(echo "$SEG_TIME_SEC > 600" | bc -l) )); then SEG_TIME_SEC=600; fi
-          SEG_TIME_INT=$(printf "%.0f" "$SEG_TIME_SEC")
-          if [ "$SEG_TIME_INT" -lt 2 ]; then SEG_TIME_INT=2; fi
 
-          echo "✂️ Splitting into ${SEG_TIME_INT}s segments (~19 MB each)"
-          ffmpeg -y -i "$INPUT_FILE" -c copy -f segment -segment_time "$SEG_TIME_INT" -reset_timestamps 1 "$SEGMENT_DIR/seg_%03d.mp4"
+          # Try to obtain duration
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE" 2>/dev/null || echo "")
+          if [ -n "$DURATION" ] && [ "$DURATION" != "0" ]; then
+            BITRATE_BPS=$(echo "scale=0; ($SIZE_BYTES * 8) / $DURATION" | bc 2>/dev/null || echo "0")
+            if [ -n "$BITRATE_BPS" ] && [ "$BITRATE_BPS" != "0" ]; then
+              SEG_TIME_SEC=$(echo "scale=2; $TARGET_BYTES / $BITRATE_BPS" | bc 2>/dev/null || echo "0")
+              if (( $(echo "$SEG_TIME_SEC > 600" | bc -l) )); then SEG_TIME_SEC=600; fi
+              SEG_TIME_INT=$(printf "%.0f" "$SEG_TIME_SEC" 2>/dev/null || echo "0")
+              if [ "$SEG_TIME_INT" -lt 2 ]; then SEG_TIME_INT=2; fi
+              echo "✂️ Duration‑based split: ${SEG_TIME_INT}s segments (target ≤18 MB)"
+              ffmpeg -y -i "$INPUT_FILE" -c copy -f segment -segment_time "$SEG_TIME_INT" -reset_timestamps 1 "$SEGMENT_DIR/seg_%03d.mp4"
+            else
+              # bitrate calculation failed → fall back to size‑based split
+              SEG_TIME_INT=""
+            fi
+          else
+            SEG_TIME_INT=""
+          fi
+
+          # If duration/bitrate approach wasn't possible, split by size directly
+          if [ -z "${SEG_TIME_INT:-}" ]; then
+            echo "✂️ Size‑based split: ≤18 MB chunks"
+            ffmpeg -y -i "$INPUT_FILE" -c copy -f segment -segment_size "$TARGET_BYTES" -reset_timestamps 1 "$SEGMENT_DIR/seg_%03d.mp4"
+          fi
+
+          # Safety net: re‑split any segment that still exceeds 19 MB
+          MAX_BYTES=19922944   # 19 MB
+          for seg in "$SEGMENT_DIR"/seg_*.mp4; do
+            [ -f "$seg" ] || continue
+            seg_size=$(stat -c%s "$seg")
+            if [ "$seg_size" -gt "$MAX_BYTES" ]; then
+              echo "⚠️  $(basename "$seg") is $((seg_size / 1048576)) MB – re‑splitting"
+              ffmpeg -y -i "$seg" -c copy -f segment -segment_size "$TARGET_BYTES" -reset_timestamps 1 "$SEGMENT_DIR/$(basename "$seg" .mp4)_%03d.mp4"
+              rm -f "$seg"
+            fi
+          done
+
           echo "✅ Segments created: $(ls -1 "$SEGMENT_DIR")"
 
           # Build JSON array of segment URLs into a file (no shell escaping)
