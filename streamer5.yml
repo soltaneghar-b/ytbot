@@ -408,11 +408,11 @@ jobs:
           ffmpeg -y -i "$INPUT_FILE" -c copy -f segment -segment_time "$SEG_TIME_INT" -reset_timestamps 1 "$SEGMENT_DIR/seg_%03d.mp4"
           echo "✅ Segments created: $(ls -1 "$SEGMENT_DIR")"
 
-          # Build JSON array of segment URLs safely
+          # Build JSON array of segment URLs into a file (no shell escaping)
           REPO="${{ github.repository }}"
           BASE_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH_NAME_STREAM}"
-          SEGMENTS_JSON=$(find "$SEGMENT_DIR" -name 'seg_*.mp4' | sort | jq -R -s -c --arg base "$BASE_URL" 'split("\n") | map(select(length > 0) | "\($base)/\(.)")')
-          echo "segments_json=${SEGMENTS_JSON}" >> $GITHUB_OUTPUT
+          ( cd "$SEGMENT_DIR" && ls -1 seg_*.mp4 | sort | jq -R -s -c --arg base "$BASE_URL" 'split("\n") | map(select(length > 0) | "\($base)/\(.)")' > /tmp/segments.json )
+          echo "✅ Segments JSON written to /tmp/segments.json"
 
       # ---------- rewrite URLs ----------
       - name: 🔗 Rewrite Playlist URLs (video)
@@ -530,11 +530,7 @@ jobs:
 
           # ---- Write metadata for the bot ----
           ZIP_URL="${{ steps.download.outputs.zip_url }}"
-          SEGMENTS_JSON="${{ steps.video_segments.outputs.segments_json }}"
-
-          # Build a proper JSON array file from the segments output
-          if [ -n "$SEGMENTS_JSON" ] && [ "$SEGMENTS_JSON" != "[]" ]; then
-            echo "$SEGMENTS_JSON" | jq -c '.' > /tmp/segments.json
+          if [ -f /tmp/segments.json ]; then
             jq -n \
               --arg download "$DOWNLOAD_URL" \
               --arg zip "$ZIP_URL" \
