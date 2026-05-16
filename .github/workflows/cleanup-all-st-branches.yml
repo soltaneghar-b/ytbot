@@ -1,4 +1,5 @@
-name: 🧹 Wipe all stream/download/zip branches in st repos
+# .github/workflows/cleanup-all-st-branches.yml
+name: 🧹 Wipe all stream/download/zip branches in st repos + state.json
 
 on:
   workflow_dispatch:
@@ -59,3 +60,35 @@ jobs:
           done
 
           echo "✅ $REPO cleaned."
+
+  wipe-state:
+    name: 🧹 Clear state.json from ytbot_rust
+    needs: wipe-st-branches
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔐 Generate token for ytbot_rust
+        id: app-token-state
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: "ytbot_rust"
+
+      - name: 🗑️ Delete state.json
+        env:
+          GH_TOKEN: ${{ steps.app-token-state.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ytbot_rust
+          BRANCH: bot-state
+        run: |
+          set -euo pipefail
+          # Get SHA of state.json
+          SHA=$(gh api "repos/$OWNER/$REPO/contents/state.json?ref=$BRANCH" -q '.sha' 2>/dev/null || true)
+          if [ -z "$SHA" ]; then
+            echo "state.json not found, nothing to delete."
+            exit 0
+          fi
+          gh api "repos/$OWNER/$REPO/contents/state.json" -X DELETE \
+            -f message="Wipe state" -f sha="$SHA" -f branch="$BRANCH" --silent
+          echo "✅ state.json deleted."
