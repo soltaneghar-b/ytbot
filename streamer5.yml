@@ -531,19 +531,24 @@ jobs:
           # ---- Write metadata for the bot ----
           ZIP_URL="${{ steps.download.outputs.zip_url }}"
           SEGMENTS_JSON="${{ steps.video_segments.outputs.segments_json }}"
-          if [ -z "$SEGMENTS_JSON" ] || [ "$SEGMENTS_JSON" = "[]" ]; then
+
+          # Build a proper JSON array file from the segments output
+          if [ -n "$SEGMENTS_JSON" ] && [ "$SEGMENTS_JSON" != "[]" ]; then
+            echo "$SEGMENTS_JSON" | jq -c '.' > /tmp/segments.json
             jq -n \
               --arg download "$DOWNLOAD_URL" \
               --arg zip "$ZIP_URL" \
               --arg playlist "$PLAYLIST_URL" \
-              '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":[]}' > metadata.json
+              --slurpfile segments /tmp/segments.json \
+              '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":$segments[0]}' \
+              > metadata.json
           else
             jq -n \
               --arg download "$DOWNLOAD_URL" \
               --arg zip "$ZIP_URL" \
               --arg playlist "$PLAYLIST_URL" \
-              --argjson segments "$SEGMENTS_JSON" \
-              '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":$segments}' > metadata.json
+              '{"download_url":$download, "zip_url":$zip, "playlist_url":$playlist, "segments":[]}' \
+              > metadata.json
           fi
 
       - name: 🎨 Generate Audio Player HTML
